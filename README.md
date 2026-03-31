@@ -12,5 +12,6 @@ Projekt zostanie zrealizowany w języku Python z wykorzystaniem:
 - matplotlib – wizualizacja wyników  
 - acados – implementacja regulatora MPC  
 - scipy – narzędzia do optymalizacji i równań różniczkowych
+- pybullet - symulacja samochodu
 
 
