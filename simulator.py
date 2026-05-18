@@ -777,107 +777,6 @@ def controller_pid(kp=2.0, ki=0.1, kd=0.5, speed=0.35):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  MPC
-# ═══════════════════════════════════════════════════════════════════════════
-
-from scipy.optimize import minimize
-
-class MPCController:
-
-    def __init__(self, model, track, N=20, dt=0.02, vx_ref=1.5,
-                 q_n=15.0, q_mu=5.0, q_vx=2.0,
-                 r_d=0.1, r_delta=0.5, r_dd=0.5, r_ddelta=1.0):
-
-        self.model    = model
-        self.track    = track
-        self.N        = N
-        self.dt       = dt
-        self.vx_ref   = vx_ref
-        self.q_n      = q_n
-        self.q_mu     = q_mu
-        self.q_vx     = q_vx
-        self.r_d      = r_d
-        self.r_delta  = r_delta
-        self.r_dd     = r_dd
-        self.r_ddelta = r_ddelta
-
-        self.delta_max = model.p.delta_max
-        self.d_max     = 1.0
-        self.d_min     = 0.0
-        self.u_prev    = np.array([0.2, 0.0])
-        self.U_warm    = np.tile(self.u_prev, (N, 1))
-
-    def _cost(self, U_flat, x0):
-        U      = U_flat.reshape(self.N, 2)
-        x      = x0.copy()
-        J      = 0.0
-        u_prev = self.u_prev.copy()
-
-        for k in range(self.N):
-            u     = U[k]
-            d     = np.clip(u[0], self.d_min, self.d_max)
-            delta = np.clip(u[1], -self.delta_max, self.delta_max)
-
-            s, n, mu, vx, vy, r = x
-
-            J += self.q_n   * n**2
-            J += self.q_mu  * mu**2
-            J += self.q_vx  * (vx - self.vx_ref)**2
-            J += self.r_d   * d**2
-            J += self.r_delta * delta**2
-            J += self.r_dd    * (d     - u_prev[0])**2
-            J += self.r_ddelta * (delta - u_prev[1])**2
-
-            # Miękka kara za wyjście poza tor
-            tw_half = self.track.track_width / 2.0
-            if abs(n) > tw_half * 0.8:
-                J += 100.0 * (abs(n) - tw_half * 0.8)**2
-
-            kappa = self.track.get_kappa(s)
-            x     = self.model.step_rk4(x, np.array([d, delta]), kappa, self.dt)
-            u_prev = np.array([d, delta])
-
-        # Koszt końcowy
-        s, n, mu, vx, vy, r = x
-        J += 3.0 * self.q_n  * n**2
-        J += 3.0 * self.q_mu * mu**2
-        J += 1.0 * self.q_vx * (vx - self.vx_ref)**2
-
-        return J
-
-    def compute_control(self, state):
-        U0      = np.roll(self.U_warm, -1, axis=0)
-        U0[-1]  = U0[-2]
-        U0_flat = U0.flatten()
-
-        bounds = []
-        for _ in range(self.N):
-            bounds.append((self.d_min,       self.d_max))
-            bounds.append((-self.delta_max,  self.delta_max))
-
-        result = minimize(
-            fun=self._cost,
-            x0=U0_flat,
-            args=(state,),
-            method='L-BFGS-B',
-            bounds=bounds,
-            options={'maxiter': 20, 'ftol': 1e-3, 'gtol': 1e-2}
-        )
-
-        U_opt      = result.x.reshape(self.N, 2)
-        self.U_warm = U_opt.copy()
-
-        u_opt    = U_opt[0].copy()
-        u_opt[0] = np.clip(u_opt[0], self.d_min,      self.d_max)
-        u_opt[1] = np.clip(u_opt[1], -self.delta_max, self.delta_max)
-
-        self.u_prev = u_opt.copy()
-        return u_opt
-
-    def __call__(self, state):
-        return self.compute_control(state)
-
-# ═══════════════════════════════════════════════════════════════════════════
 #  MAIN – demonstracja
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -913,19 +812,6 @@ if __name__ == "__main__":
     # ctrl = controller_zero
     # ctrl = controller_random
     # ctrl = controller_pid(kp=2.0, ki=0.1, kd=0.5, speed=0.35)
-
-    # Użyj MPC:
-    # ctrl = MPCController(
-    #     model=sim.model,
-    #     track=track,
-    #     N=10,  # horyzont 20 kroków × 0.02s = 0.4s w przód
-    #     dt=0.02,
-    #     vx_ref=4.5,  # docelowa prędkość [m/s]
-    #     q_n=15.0,  # kara za zjazd z toru
-    #     q_mu=5.0,  # kara za kąt
-    #     q_vx=2.0,  # kara za prędkość
-    # )
-
 
     # Symulacja 10 sekund (500 kroków po 20ms)
     n_steps = 200
