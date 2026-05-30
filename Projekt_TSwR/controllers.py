@@ -135,7 +135,7 @@ class MPCController:
                  q_mu:     float = 5.0,
                  q_vx:     float = 2.0,
                  r_d:      float = 0.1,
-                 r_delta:  float = 0.5,
+                 r_delta:  float = 15.0,
                  r_dd:     float = 0.5,
                  r_ddelta: float = 1.0):
 
@@ -240,9 +240,10 @@ class MPCController:
         # ── OCP ───────────────────────────────────────────────────────────
         ocp                         = AcadosOcp()
         ocp.model                   = model
-        ocp.dims.N                  = N
+        ocp.solver_options.N_horizon = N
         ocp.solver_options.tf       = N * dt
         ocp.dims.np                 = 1   # jeden parametr: kappa
+        ocp.parameter_values = np.array([0.0])
 
         # Funkcja kosztu (EXTERNAL → własna)
         # Używamy NONLINEAR_LS: y = [n, mu, vx-vx_ref, d, delta]
@@ -274,8 +275,8 @@ class MPCController:
 
         # Miękkie ograniczenie na n (granica toru)
         hw = self.track.track_width / 2
-        ocp.constraints.lbx   = np.array([-hw])
-        ocp.constraints.ubx   = np.array([ hw])
+        ocp.constraints.lbx   = np.array([-hw * 2.0]) # 2 razy luźniej, funkcja kosztu i tak ściągnie auto do środka
+        ocp.constraints.ubx   = np.array([ hw * 2.0])
         ocp.constraints.idxbx = np.array([1])   # indeks n w wektorze x
 
         # Stan początkowy
@@ -315,19 +316,55 @@ class MPCController:
             kap_k = self.track.get_kappa(s_k)
             solver.set(k, 'p', np.array([kap_k]))
 
-        # Ciepły start
+        solver.set(self.N, 'p', np.array([kap_k]))
+
+        # ─── POPRAWKA 1: Przesunięcie sterowań (Warm Start) ───
+        # Podobnie jak w scipy, przesuwamy macierz sterowań o 1 krok czasowy
+        self.U_warm = np.roll(self.U_warm, -1, axis=0)
+        self.U_warm[-1] = self.U_warm[-2]
+
+        # ─── POPRAWKA 2: Inicjalizacja stanów przez propagację nieliniową ───
+        x_current = state.copy()
         for k in range(self.N):
             solver.set(k, 'u', self.U_warm[k])
+            solver.set(k, 'x', x_current)
+            
+            # Wyznaczamy spójny fizycznie stan dla kolejnego kroku na horyzoncie
+            kap_k = self.track.get_kappa(x_current[0])
+            x_current = self.model.step_rk4(x_current, self.U_warm[k], kap_k, self.dt)
+            
+        solver.set(self.N, 'x', x_current) # Stan terminalny
 
         status = solver.solve()
         if status not in [0, 2]:   # 0=OK, 2=max_iter (akceptowalne w RTI)
             print(f"[acados] status={status}, używam poprzedniego u")
-            return self.u_prev.copy()
 
+            s, n, mu, vx, vy, r = state
+            X, Y, psi_track = self.track.frenet_to_cartesian(s, n)
+            psi = psi_track + mu
+            X_front = X + self.model.p.lf * np.cos(psi)
+            Y_front = Y + self.model.p.lf * np.sin(psi)
+
+            print(
+                f"s={s:.2f}m | n={n:.3f}m | mu={mu:.3f}rad | "
+                f"vx={vx:.2f}m/s | vy={vy:.2f}m/s | r={r:.2f}rad/s | "
+                f"Xf={X_front:.3f}m | Yf={Y_front:.3f}m | psi={psi:.3f}rad | "
+                f"u_prev=[d={self.u_prev[0]:.3f}, delta={self.u_prev[1]*180/np.pi:.1f}°]"
+            )
+            _, n, mu, vx, _, _ = state
+            delta_fb = float(np.clip(-3.0*n - 2.0*mu, -self.delta_max, self.delta_max))
+            d_fb     = float(np.clip(0.3 * (self.vx_ref - vx) + 0.2, 0.0, 1.0))
+            u_fallback = np.array([d_fb, delta_fb])
+            self.u_prev = u_fallback
+            # Zresetuj ciepły start żeby solver mógł zbiec od nowa
+            kappa0 = self.track.get_kappa(state[0])
+            delta0 = float(np.clip(self.model.p.lf * kappa0, -self.delta_max, self.delta_max))
+            self.U_warm = np.tile([0.3, delta0], (self.N, 1))
+            return u_fallback
         # Pobierz pierwsze sterowanie
         u_opt = solver.get(0, 'u')
 
-        # Zapisz ciepły start
+        # Zapisz ciepły start z aktualnego rozwiązania solvera
         for k in range(self.N):
             self.U_warm[k] = solver.get(k, 'u')
 
@@ -335,7 +372,7 @@ class MPCController:
         u_opt[1] = np.clip(u_opt[1], -self.delta_max, self.delta_max)
         self.u_prev = u_opt.copy()
         return u_opt
-
+    
     def _solve_scipy(self, state: np.ndarray) -> np.ndarray:
         """Fallback: scipy L-BFGS-B (gdy acados niedostępny)."""
         from scipy.optimize import minimize

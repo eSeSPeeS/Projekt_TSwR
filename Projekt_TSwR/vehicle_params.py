@@ -38,7 +38,7 @@ class VehicleParams:
     # Ograniczenia sterowania
     delta_max: float = 0.35   # max kąt skrętu [rad] (~20°)
     v_min:     float = 0.0    # min prędkość [m/s]
-    v_max:     float = 8.0    # max prędkość [m/s]
+    v_max:     float = 16.0    # max prędkość [m/s]
 
     # Grawitacja
     g: float = 9.81

@@ -75,6 +75,155 @@ class TrackCenterline:
 
         return cls(x=x, y=y, kappa=kappa,
                    s_breaks=s_breaks, track_width=track_width)
+    @classmethod
+    def make_technical(cls, base_r: float = 6.0,
+                    n_points: int = 1200,
+                    track_width: float = 1.5) -> "TrackCenterline":
+        """Techniczny tor bez przecięć, z wieloma zakrętami."""
+        t = np.linspace(0, 2 * np.pi, n_points, endpoint=False)
+
+        r = (
+            base_r
+            + 1.2 * np.sin(2 * t)
+            + 0.9 * np.sin(3 * t + 0.4)
+            + 0.5 * np.sin(5 * t - 0.7)
+        )
+
+        x = r * np.cos(t)
+        y = 0.85 * r * np.sin(t)
+
+        dx = np.gradient(x, t)
+        dy = np.gradient(y, t)
+        ddx = np.gradient(dx, t)
+        ddy = np.gradient(dy, t)
+
+        denom = (dx**2 + dy**2) ** 1.5
+        denom = np.where(denom < 1e-6, 1e-6, denom)
+        kappa = (dx * ddy - dy * ddx) / denom
+
+        ds_dt = np.sqrt(dx**2 + dy**2)
+        dt_arr = np.diff(t, append=t[-1] - t[-2])
+        ds = ds_dt * np.abs(dt_arr)
+        s_breaks = np.concatenate([[0], np.cumsum(ds[:-1])])
+
+        return cls(
+            x=x,
+            y=y,
+            kappa=kappa,
+            s_breaks=s_breaks,
+            track_width=track_width,
+        )
+    @classmethod
+    def make_technical_sharp(cls, base_r: float = 6.5,
+                            n_points: int = 1400,
+                            track_width: float = 1.5) -> "TrackCenterline":
+        """Techniczny tor bez przecięć, z ostrzejszymi zakrętami."""
+        t = np.linspace(0, 2 * np.pi, n_points, endpoint=False)
+
+        r = (
+            base_r
+            + 1.4 * np.sin(2 * t)
+            + 1.0 * np.sin(3 * t + 0.3)
+            + 0.8 * np.sin(5 * t - 0.6)
+            + 0.35 * np.sin(7 * t + 1.0)
+        )
+
+        x = r * np.cos(t)
+        y = 0.82 * r * np.sin(t)
+
+        dx = np.gradient(x, t)
+        dy = np.gradient(y, t)
+        ddx = np.gradient(dx, t)
+        ddy = np.gradient(dy, t)
+
+        denom = (dx**2 + dy**2) ** 1.5
+        denom = np.where(denom < 1e-6, 1e-6, denom)
+        kappa = (dx * ddy - dy * ddx) / denom
+
+        ds_dt = np.sqrt(dx**2 + dy**2)
+        dt_arr = np.diff(t, append=t[-1] - t[-2])
+        ds = ds_dt * np.abs(dt_arr)
+        s_breaks = np.concatenate([[0], np.cumsum(ds[:-1])])
+
+        return cls(
+            x=x,
+            y=y,
+            kappa=kappa,
+            s_breaks=s_breaks,
+            track_width=track_width,
+        )
+    @classmethod
+    def make_chicane(cls, length: float = 10.0, height: float = 3.0,
+                    n_points: int = 900,
+                    track_width: float = 0.60) -> "TrackCenterline":
+        """Trudny tor z szykanami, ale szeroki."""
+        t = np.linspace(0, 2 * np.pi, n_points, endpoint=False)
+
+        x = (length / 2.0) * np.cos(t)
+        y = (
+            0.9 * np.sin(t)
+            + 0.55 * np.sin(2 * t)
+            - 0.35 * np.sin(3 * t)
+        ) * height
+
+        dx = np.gradient(x, t)
+        dy = np.gradient(y, t)
+        ddx = np.gradient(dx, t)
+        ddy = np.gradient(dy, t)
+
+        denom = (dx**2 + dy**2) ** 1.5
+        denom = np.where(denom < 1e-6, 1e-6, denom)
+        kappa = (dx * ddy - dy * ddx) / denom
+
+        ds_dt = np.sqrt(dx**2 + dy**2)
+        dt_arr = np.diff(t, append=t[-1] - t[-2])
+        ds = ds_dt * np.abs(dt_arr)
+        s_breaks = np.concatenate([[0], np.cumsum(ds[:-1])])
+
+        return cls(
+            x=x,
+            y=y,
+            kappa=kappa,
+            s_breaks=s_breaks,
+            track_width=track_width,
+        )
+    
+    @classmethod
+    def make_road_loop(cls, length: float = 10.0, width: float = 6.0,
+                       n_points: int = 700,
+                       track_width: float = 0.35) -> "TrackCenterline":
+        """
+        Prosty zamknięty tor drogowy:
+        dwie dłuższe proste i dwa zakręty o różnej ciasności,
+        bez samoprzecięć.
+        """
+        t = np.linspace(0, 2 * np.pi, n_points, endpoint=False)
+
+        # Gładka zamknięta pętla bardziej "drogowa" niż elipsa
+        x = (length / 2) * np.cos(t) + 0.8 * np.cos(2 * t)
+        y = (width / 2) * np.sin(t) - 0.6 * np.sin(2 * t)
+
+        dx = np.gradient(x, t)
+        dy = np.gradient(y, t)
+        ddx = np.gradient(dx, t)
+        ddy = np.gradient(dy, t)
+
+        denom = (dx**2 + dy**2) ** 1.5
+        denom = np.where(denom < 1e-6, 1e-6, denom)
+        kappa = (dx * ddy - dy * ddx) / denom
+
+        ds_dt = np.sqrt(dx**2 + dy**2)
+        dt_arr = np.diff(t, append=t[-1] - t[-2])
+        ds = ds_dt * np.abs(dt_arr)
+        s_breaks = np.concatenate([[0], np.cumsum(ds[:-1])])
+
+        return cls(
+            x=x,
+            y=y,
+            kappa=kappa,
+            s_breaks=s_breaks,
+            track_width=track_width
+        )
 
     # ── Właściwości ───────────────────────────────────────────────────────
 
