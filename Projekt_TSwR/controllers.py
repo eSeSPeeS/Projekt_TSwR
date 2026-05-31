@@ -99,16 +99,19 @@ class MPCController:
                            + r_dd·Δd² + r_ddelta·Δdelta² ]
            + terminal cost (×3)
 
-      s.t. x_{k+1} = f(x_k, u_k, κ)   ← dynamika RK4 (dyskretna)
+      s.t. x_{k+1} = f(x_k, u_k, κ) + B_d·g(x_k, u_k)   ← RK4 + GP
            |delta| ≤ delta_max
            0 ≤ d ≤ 1
            |n| ≤ track_width/2          ← miękkie
 
+    Opcjonalna integracja z Gaussowskim modelem resztkowym (GP):
+      • Jeśli gp_model jest podany i wytrenowany, resztka GP jest dodawana
+        do predykcji stanów w trakcie optymalizacji scipy (warm-start)
+        oraz w fazie propagacji stanu dla acados.
+      • gp_model=None lub gp_model.enabled=False → klasyczny MPC.
+
     Jeśli acados nie jest zainstalowane, automatycznie odpada do
     solvera scipy L-BFGS-B (wolniejszy, ale działa wszędzie).
-
-    Instalacja acados (Linux):
-        https://docs.acados.org/installation/index.html
 
     Args:
         model:    DynamicBicycleModel
@@ -123,6 +126,7 @@ class MPCController:
         r_delta:  regularyzacja kąta skrętu
         r_dd:     kara za zmianę d (płynność)
         r_ddelta: kara za zmianę delta (płynność)
+        gp_model: GPResidualModel lub None – model GP do korekcji dynamiki
     """
 
     def __init__(self,
@@ -137,7 +141,8 @@ class MPCController:
                  r_d:      float = 0.1,
                  r_delta:  float = 15.0,
                  r_dd:     float = 0.5,
-                 r_ddelta: float = 1.0):
+                 r_ddelta: float = 1.0,
+                 gp_model=None):
 
         self.model    = model
         self.track    = track
@@ -151,6 +156,20 @@ class MPCController:
         self.r_delta  = r_delta
         self.r_dd     = r_dd
         self.r_ddelta = r_ddelta
+
+        # ── GP Residual Model ─────────────────────────────────────────────
+        self.gp_model = gp_model
+        self._gp_active = (
+            gp_model is not None
+            and getattr(gp_model, 'enabled', False)
+            and getattr(gp_model, 'trained', False)
+        )
+        if self._gp_active:
+            print("[MPC] GP Residual Model AKTYWNY – korekcja dynamiki włączona.")
+        elif gp_model is not None:
+            print("[MPC] GP podany, ale nieaktywny (enabled=False lub nietrend.).")
+        else:
+            print("[MPC] GP wyłączony – klasyczny MPC.")
 
         p = model.p
         self.delta_max = p.delta_max
@@ -324,16 +343,42 @@ class MPCController:
         self.U_warm[-1] = self.U_warm[-2]
 
         # ─── POPRAWKA 2: Inicjalizacja stanów przez propagację nieliniową ───
+        # Jeśli GP jest aktywny, używamy batchowej predykcji resztek dla
+        # całego horyzontu (efektywniejsze niż N osobnych wywołań).
         x_current = state.copy()
-        for k in range(self.N):
-            solver.set(k, 'u', self.U_warm[k])
-            solver.set(k, 'x', x_current)
-            
-            # Wyznaczamy spójny fizycznie stan dla kolejnego kroku na horyzoncie
-            kap_k = self.track.get_kappa(x_current[0])
-            x_current = self.model.step_rk4(x_current, self.U_warm[k], kap_k, self.dt)
-            
-        solver.set(self.N, 'x', x_current) # Stan terminalny
+        if self._gp_active:
+            # Zbierz stany i sterowania horyzontu do batcha GP
+            X_horizon = np.zeros((self.N, 6))
+            U_horizon = np.zeros((self.N, 2))
+            x_prop = state.copy()
+            for k in range(self.N):
+                X_horizon[k] = x_prop
+                U_horizon[k] = self.U_warm[k]
+                kap_k = self.track.get_kappa(x_prop[0])
+                x_prop = self.model.step_rk4(x_prop, self.U_warm[k], kap_k, self.dt)
+
+            # Batchowa korekcja GP (jedna wspólna inferenca dla całego horyzontu)
+            gp_residuals = self.gp_model.predict_residual_batch(X_horizon, U_horizon)
+
+            # Inicjalizuj solver z GP-skorygowaną trajektorią
+            x_current = state.copy()
+            for k in range(self.N):
+                solver.set(k, "u", self.U_warm[k])
+                solver.set(k, "x", x_current)
+                kap_k = self.track.get_kappa(x_current[0])
+                x_nom = self.model.step_rk4(x_current, self.U_warm[k], kap_k, self.dt)
+                # Dodaj korekcję GP: x_{k+1} = f(x_k,u_k) + B_d·g(x_k,u_k)
+                x_nom[[3, 4, 5]] += gp_residuals[k]
+                x_current = x_nom
+        else:
+            for k in range(self.N):
+                solver.set(k, "u", self.U_warm[k])
+                solver.set(k, "x", x_current)
+                # Wyznaczamy spójny fizycznie stan dla kolejnego kroku na horyzoncie
+                kap_k = self.track.get_kappa(x_current[0])
+                x_current = self.model.step_rk4(x_current, self.U_warm[k], kap_k, self.dt)
+
+        solver.set(self.N, "x", x_current)  # Stan terminalny
 
         status = solver.solve()
         if status not in [0, 2]:   # 0=OK, 2=max_iter (akceptowalne w RTI)
@@ -406,7 +451,7 @@ class MPCController:
 
     def _cost_scipy(self, U_flat: np.ndarray,
                     x0: np.ndarray) -> float:
-        """Funkcja kosztu dla scipy."""
+        """Funkcja kosztu dla scipy (z opcjonalną korekcją GP)."""
         U      = U_flat.reshape(self.N, 2)
         x      = x0.copy()
         J      = 0.0
@@ -416,6 +461,7 @@ class MPCController:
         for k in range(self.N):
             d     = np.clip(U[k, 0], self.d_min, self.d_max)
             delta = np.clip(U[k, 1], -self.delta_max, self.delta_max)
+            u_k   = np.array([d, delta])
             s, n, mu, vx, vy, r = x
 
             J += self.q_n    * n**2
@@ -429,8 +475,15 @@ class MPCController:
                 J += 100.0 * (abs(n) - tw * 0.8)**2
 
             kappa  = self.track.get_kappa(s)
-            x      = self.model.step_rk4(x, np.array([d, delta]), kappa, self.dt)
-            u_prev = np.array([d, delta])
+            x_nom  = self.model.step_rk4(x, u_k, kappa, self.dt)
+
+            # Korekcja GP: x_{k+1} = f(x_k, u_k) + B_d·g(x_k, u_k)
+            if self._gp_active:
+                resid, _ = self.gp_model.predict_residual(x, u_k)
+                x_nom[[3, 4, 5]] += resid
+
+            x      = x_nom
+            u_prev = u_k
 
         s, n, mu, vx, vy, r = x
         J += 3 * self.q_n  * n**2

@@ -76,6 +76,64 @@ class TrackCenterline:
         return cls(x=x, y=y, kappa=kappa,
                    s_breaks=s_breaks, track_width=track_width)
     @classmethod
+    def make_pocket(cls, n_points: int = 1200,
+                    track_width: float = 1.5) -> "TrackCenterline":
+        """Tor typu pocket/U-turn, szeroki i bez przecięć."""
+        pts = np.array([
+            [-6.0, -4.5],
+            [-6.0,  4.5],
+            [-2.2,  4.5],
+            [-2.2,  1.2],
+            [ 0.0,  1.2],
+            [ 0.0,  4.5],
+            [ 6.0,  4.5],
+            [ 6.0, -4.5],
+            [-6.0, -4.5],
+        ], dtype=float)
+
+        seg_lens = np.sqrt(np.sum(np.diff(pts, axis=0)**2, axis=1))
+        total_len = np.sum(seg_lens)
+
+        samples = []
+        for i in range(len(pts) - 1):
+            p0, p1 = pts[i], pts[i + 1]
+            m = max(20, int(n_points * seg_lens[i] / total_len))
+            t = np.linspace(0, 1, m, endpoint=False)
+            seg = (1 - t)[:, None] * p0 + t[:, None] * p1
+            samples.append(seg)
+
+        xy = np.vstack(samples)
+
+        # lekkie wygładzenie
+        win = 21
+        pad = win // 2
+        x_pad = np.pad(xy[:, 0], (pad, pad), mode='wrap')
+        y_pad = np.pad(xy[:, 1], (pad, pad), mode='wrap')
+        kernel = np.ones(win) / win
+        x = np.convolve(x_pad, kernel, mode='valid')
+        y = np.convolve(y_pad, kernel, mode='valid')
+
+        t = np.linspace(0, 2 * np.pi, len(x), endpoint=False)
+        dx = np.gradient(x, t)
+        dy = np.gradient(y, t)
+        ddx = np.gradient(dx, t)
+        ddy = np.gradient(dy, t)
+
+        denom = (dx**2 + dy**2) ** 1.5
+        denom = np.where(denom < 1e-6, 1e-6, denom)
+        kappa = (dx * ddy - dy * ddx) / denom
+
+        ds = np.sqrt(np.diff(x, append=x[0])**2 + np.diff(y, append=y[0])**2)
+        s_breaks = np.concatenate([[0], np.cumsum(ds[:-1])])
+
+        return cls(
+            x=x,
+            y=y,
+            kappa=kappa,
+            s_breaks=s_breaks,
+            track_width=track_width,
+        )
+    @classmethod
     def make_technical(cls, base_r: float = 6.0,
                     n_points: int = 1200,
                     track_width: float = 1.5) -> "TrackCenterline":

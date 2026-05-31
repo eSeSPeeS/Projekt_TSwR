@@ -562,8 +562,8 @@ void f1tenth_frenet_acados_setup_nlp_in(f1tenth_frenet_solver_capsule* capsule, 
 
    double* W_0 = calloc(NY0*NY0, sizeof(double));
     // change only the non-zero elements:
-    W_0[0+(NY0) * 0] = 1;
-    W_0[1+(NY0) * 1] = 1;
+    W_0[0+(NY0) * 0] = 10;
+    W_0[1+(NY0) * 1] = 10;
     W_0[2+(NY0) * 2] = 2;
     W_0[3+(NY0) * 3] = 0.1;
     W_0[4+(NY0) * 4] = 0.5;
@@ -579,8 +579,8 @@ void f1tenth_frenet_acados_setup_nlp_in(f1tenth_frenet_solver_capsule* capsule, 
     free(yref);
     double* W = calloc(NY*NY, sizeof(double));
     // change only the non-zero elements:
-    W[0+(NY) * 0] = 1;
-    W[1+(NY) * 1] = 1;
+    W[0+(NY) * 0] = 10;
+    W[1+(NY) * 1] = 10;
     W[2+(NY) * 2] = 2;
     W[3+(NY) * 3] = 0.1;
     W[4+(NY) * 4] = 0.5;
@@ -597,8 +597,8 @@ void f1tenth_frenet_acados_setup_nlp_in(f1tenth_frenet_solver_capsule* capsule, 
 
     double* W_e = calloc(NYN*NYN, sizeof(double));
     // change only the non-zero elements:
-    W_e[0+(NYN) * 0] = 3;
-    W_e[1+(NYN) * 1] = 3;
+    W_e[0+(NYN) * 0] = 30;
+    W_e[1+(NYN) * 1] = 30;
     W_e[2+(NYN) * 2] = 2;
     ocp_nlp_cost_model_set(nlp_config, nlp_dims, nlp_in, N, "W", W_e);
     free(W_e);
@@ -671,8 +671,8 @@ void f1tenth_frenet_acados_setup_nlp_in(f1tenth_frenet_solver_capsule* capsule, 
     double* lbu = lubu;
     double* ubu = lubu + NBU;
     ubu[0] = 1;
-    lbu[1] = -0.35;
-    ubu[1] = 0.35;
+    lbu[1] = -0.5;
+    ubu[1] = 0.5;
 
     for (int i = 0; i < N; i++)
     {
@@ -696,8 +696,8 @@ void f1tenth_frenet_acados_setup_nlp_in(f1tenth_frenet_solver_capsule* capsule, 
     double* lubx = calloc(2*NBX, sizeof(double));
     double* lbx = lubx;
     double* ubx = lubx + NBX;
-    lbx[0] = -0.35;
-    ubx[0] = 0.35;
+    lbx[0] = -1.5;
+    ubx[0] = 1.5;
 
     for (int i = 1; i < N; i++)
     {

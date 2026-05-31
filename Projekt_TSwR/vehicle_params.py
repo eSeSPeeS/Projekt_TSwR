@@ -36,9 +36,9 @@ class VehicleParams:
     Cr2: float = 0.0      # opór aerodynamiczny [N·s²/m²]
 
     # Ograniczenia sterowania
-    delta_max: float = 0.35   # max kąt skrętu [rad] (~20°)
+    delta_max: float = 0.5   # max kąt skrętu [rad] (~30°)
     v_min:     float = 0.0    # min prędkość [m/s]
-    v_max:     float = 16.0    # max prędkość [m/s]
+    v_max:     float = 8.0    # max prędkość [m/s]
 
     # Grawitacja
     g: float = 9.81

@@ -60,7 +60,7 @@ class F1tenthSimulator:
         if self.use_pybullet:
             self._init_pybullet()
 
-    def reset(self, s0: float = 0.0, n0: float = 0.0,
+    def reset(self, s0: float = 1.0, n0: float = 0.0,
               mu0: float = 0.0, vx0: float = 1.0) -> np.ndarray:
         self.state = np.array([s0, n0, mu0, vx0, 0.0, 0.0], dtype=float)
         self.time = 0.0
