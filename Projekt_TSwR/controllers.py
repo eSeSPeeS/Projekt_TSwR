@@ -4,14 +4,14 @@ controllers.py
 Kontrolery dla symulatora F1/10.
 
 Dostępne:
-  controller_zero()          – brak sterowania
-  controller_const_speed()   – prosty regulator P
-  controller_pid()           – regulator PID
-  controller_random()        – losowe sterowanie (testy)
-  MPCController              – MPC zaimplementowany w acados
+    controller_zero()         – brak sterowania
+    controller_const_speed()  – prosty regulator P
+    controller_pid()          – regulator PID
+    controller_random()       – losowe sterowanie (testy)
+    MPCController             – MPC zaimplementowany w acados
 
 Interfejs każdego kontrolera:
-    u = ctrl(state)   →  np.ndarray([d, delta])
+    u = ctrl(state) → np.ndarray([d, delta])
     state = [s, n, mu, vx, vy, r]
 """
 
@@ -19,10 +19,10 @@ import numpy as np
 from vehicle_params import VehicleParams
 from vehicle_model import DynamicBicycleModel
 from track import TrackCenterline
-
+from linear_operator.settings import max_cg_iterations, cg_tolerance
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  PROSTE KONTROLERY (do testów i porównań)
+# PROSTE KONTROLERY (do testów i porównań)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def controller_zero(state: np.ndarray) -> np.ndarray:
@@ -39,11 +39,11 @@ def controller_random(state: np.ndarray) -> np.ndarray:
 
 
 def controller_const_speed(speed: float = 0.35,
-                            kp_steering: float = 2.0):
+                           kp_steering: float = 2.0):
     """
     Prosty regulator P:
-      delta = -kp·n - 1.5·mu
-      d     = stała
+        delta = -kp·n - 1.5·mu
+        d = stała
 
     Args:
         speed:       stały sygnał napędowy [0, 1]
@@ -58,7 +58,7 @@ def controller_const_speed(speed: float = 0.35,
 
 
 def controller_pid(kp: float = 5.0, ki: float = 0.1,
-                   kd: float = 0.5,  speed: float = 0.35,
+                   kd: float = 0.5, speed: float = 0.35,
                    dt: float = 0.02):
     """
     Regulator PID na błąd boczny n.
@@ -74,9 +74,9 @@ def controller_pid(kp: float = 5.0, ki: float = 0.1,
     def ctrl(state: np.ndarray) -> np.ndarray:
         _, n, mu, vx, _, _ = state
 
-        integral[0] += n * dt
-        derivative    = (n - prev_n[0]) / dt
-        prev_n[0]     = n
+        integral[0]   += n * dt
+        derivative     = (n - prev_n[0]) / dt
+        prev_n[0]      = n
 
         delta = -(kp * n + ki * integral[0] + kd * derivative) - 1.0 * mu
         delta = np.clip(delta, -0.35, 0.35)
@@ -86,7 +86,7 @@ def controller_pid(kp: float = 5.0, ki: float = 0.1,
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  MPC – acados
+# MPC – acados
 # ══════════════════════════════════════════════════════════════════════════════
 
 class MPCController:
@@ -94,15 +94,15 @@ class MPCController:
     Model Predictive Control dla F1/10 zaimplementowany w acados.
 
     Sformułowanie:
-      min  Σ_{k=0}^{N-1} [ q_n·n² + q_mu·mu² + q_vx·(vx-vx_ref)²
+        min Σ_{k=0}^{N-1} [ q_n·n² + q_mu·mu² + q_vx·(vx-vx_ref)²
                            + r_d·d² + r_delta·delta²
                            + r_dd·Δd² + r_ddelta·Δdelta² ]
-           + terminal cost (×3)
+          + terminal cost (×3)
 
-      s.t. x_{k+1} = f(x_k, u_k, κ) + B_d·g(x_k, u_k)   ← RK4 + GP
-           |delta| ≤ delta_max
-           0 ≤ d ≤ 1
-           |n| ≤ track_width/2          ← miękkie
+        s.t. x_{k+1} = f(x_k, u_k, κ) + B_d·g(x_k, u_k) ← RK4 + GP
+             |delta| ≤ delta_max
+             0 ≤ d ≤ 1
+             |n| ≤ track_width/2   ← miękkie
 
     Opcjonalna integracja z Gaussowskim modelem resztkowym (GP):
       • Jeśli gp_model jest podany i wytrenowany, resztka GP jest dodawana
@@ -112,6 +112,13 @@ class MPCController:
 
     Jeśli acados nie jest zainstalowane, automatycznie odpada do
     solvera scipy L-BFGS-B (wolniejszy, ale działa wszędzie).
+
+    Wąż predykcyjny:
+      Po każdym wywołaniu compute_control() dostępne jest pole:
+          self.prediction_xy  →  np.ndarray kształtu (N+1, 2)
+      zawierające przewidywaną trajektorię pojazdu w układzie kartezjańskim
+      (X, Y) dla bieżącego horyzontu MPC.  Symulator używa tego pola do
+      rysowania węża w trybie realtime_plot.
 
     Args:
         model:    DynamicBicycleModel
@@ -130,17 +137,17 @@ class MPCController:
     """
 
     def __init__(self,
-                 model:    DynamicBicycleModel,
-                 track:    TrackCenterline,
-                 N:        int   = 20,
-                 dt:       float = 0.02,
-                 vx_ref:   float = 1.5,
-                 q_n:      float = 15.0,
-                 q_mu:     float = 5.0,
-                 q_vx:     float = 2.0,
-                 r_d:      float = 0.1,
-                 r_delta:  float = 15.0,
-                 r_dd:     float = 0.5,
+                 model: DynamicBicycleModel,
+                 track: TrackCenterline,
+                 N: int = 20,
+                 dt: float = 0.02,
+                 vx_ref: float = 1.5,
+                 q_n: float = 15.0,
+                 q_mu: float = 5.0,
+                 q_vx: float = 2.0,
+                 r_d: float = 0.1,
+                 r_delta: float = 15.0,
+                 r_dd: float = 0.5,
                  r_ddelta: float = 1.0,
                  gp_model=None):
 
@@ -158,12 +165,13 @@ class MPCController:
         self.r_ddelta = r_ddelta
 
         # ── GP Residual Model ─────────────────────────────────────────────
-        self.gp_model = gp_model
+        self.gp_model  = gp_model
         self._gp_active = (
             gp_model is not None
             and getattr(gp_model, 'enabled', False)
             and getattr(gp_model, 'trained', False)
         )
+
         if self._gp_active:
             print("[MPC] GP Residual Model AKTYWNY – korekcja dynamiki włączona.")
         elif gp_model is not None:
@@ -179,8 +187,12 @@ class MPCController:
         self.u_prev  = np.array([0.2, 0.0])
         self.U_warm  = np.tile(self.u_prev, (N, 1))
 
+        # ── Wąż predykcyjny – pole publiczne ────────────────────────────
+        # Kształt (N+1, 2): punkt bieżący + N punktów horyzontu w [X, Y]
+        self.prediction_xy: np.ndarray = np.zeros((N + 1, 2))
+
         # Próba użycia acados
-        self._use_acados = False
+        self._use_acados  = False
         self._ocp_solver  = None
         try:
             self._build_acados_solver()
@@ -193,34 +205,22 @@ class MPCController:
     # ── Budowanie solvera acados ──────────────────────────────────────────
 
     def _build_acados_solver(self):
-        """
-        Buduje solver acados OCP dla modelu F1/10.
-
-        Model w acados musi być opisany symboliczne (CasADi).
-        Tutaj tworzymy uproszczony model liniowy wokół punktu roboczego
-        jako punkt startowy – docelowo zastąp pełnym nieliniowym modelem.
-        """
         from acados_template import AcadosOcp, AcadosOcpSolver, AcadosModel
         import casadi as ca
 
-        p   = self.model.p
-        N   = self.N
-        dt  = self.dt
+        p  = self.model.p
+        N  = self.N
+        dt = self.dt
 
-        # ── Model symboliczny (CasADi) ────────────────────────────────────
-        # Stany: [s, n, mu, vx, vy, r]
-        # Wejścia: [d, delta]
-
-        x_sym  = ca.MX.sym('x', 6)
-        u_sym  = ca.MX.sym('u', 2)
-        kap    = ca.MX.sym('kappa')   # parametr (krzywizna)
+        x_sym = ca.MX.sym('x', 6)
+        u_sym = ca.MX.sym('u', 2)
+        kap   = ca.MX.sym('kappa')
 
         s, n, mu, vx, vy, r = (x_sym[i] for i in range(6))
         d, delta = u_sym[0], u_sym[1]
 
         vx_safe = ca.fmax(vx, 1e-3)
 
-        # Pacejka (CasADi)
         def pacejka_ca(B, C, D, alpha):
             return D * ca.sin(C * ca.atan(B * alpha))
 
@@ -241,33 +241,28 @@ class MPCController:
 
         f_cont = ca.vertcat(ds_dt, dn_dt, dmu_dt, dvx_dt, dvy_dt, dr_dt)
 
-        # RK4 (dyskretny)
         k1 = f_cont
         k2 = ca.substitute(f_cont, x_sym, x_sym + dt/2 * k1)
         k3 = ca.substitute(f_cont, x_sym, x_sym + dt/2 * k2)
-        k4 = ca.substitute(f_cont, x_sym, x_sym + dt   * k3)
+        k4 = ca.substitute(f_cont, x_sym, x_sym + dt * k3)
         x_next = x_sym + dt / 6 * (k1 + 2*k2 + 2*k3 + k4)
 
-        # ── AcadosModel ───────────────────────────────────────────────────
-        model     = AcadosModel()
-        model.name = 'f1tenth_frenet'
-        model.x    = x_sym
-        model.u    = u_sym
-        model.p    = kap
+        model       = AcadosModel()
+        model.name  = 'f1tenth_frenet'
+        model.x     = x_sym
+        model.u     = u_sym
+        model.p     = kap
         model.disc_dyn_expr = x_next
 
-        # ── OCP ───────────────────────────────────────────────────────────
-        ocp                         = AcadosOcp()
-        ocp.model                   = model
+        ocp = AcadosOcp()
+        ocp.model = model
         ocp.solver_options.N_horizon = N
-        ocp.solver_options.tf       = N * dt
-        ocp.dims.np                 = 1   # jeden parametr: kappa
-        ocp.parameter_values = np.array([0.0])
+        ocp.solver_options.tf        = N * dt
+        ocp.dims.np                  = 1
+        ocp.parameter_values         = np.array([0.0])
 
-        # Funkcja kosztu (EXTERNAL → własna)
-        # Używamy NONLINEAR_LS: y = [n, mu, vx-vx_ref, d, delta]
-        ny   = 5   # rozmiar residuum
-        ny_e = 3   # terminal: [n, mu, vx-vx_ref]
+        ny   = 5
+        ny_e = 3
 
         y_expr   = ca.vertcat(n, mu, vx - self.vx_ref, d, delta)
         y_e_expr = ca.vertcat(n, mu, vx - self.vx_ref)
@@ -282,31 +277,31 @@ class MPCController:
                       self.r_d, self.r_delta])
         Qe = np.diag([3*self.q_n, 3*self.q_mu, self.q_vx])
 
-        ocp.cost.W   = Q
-        ocp.cost.W_e = Qe
-        ocp.cost.yref   = np.zeros(ny)
+        ocp.cost.W     = Q
+        ocp.cost.W_e   = Qe
+        ocp.cost.yref  = np.zeros(ny)
         ocp.cost.yref_e = np.zeros(ny_e)
 
-        # Ograniczenia wejść
-        ocp.constraints.lbu   = np.array([self.d_min, -self.delta_max])
-        ocp.constraints.ubu   = np.array([self.d_max,  self.delta_max])
-        ocp.constraints.idxbu = np.array([0, 1])
+        ocp.constraints.lbu    = np.array([self.d_min, -self.delta_max])
+        ocp.constraints.ubu    = np.array([self.d_max,  self.delta_max])
+        ocp.constraints.idxbu  = np.array([0, 1])
 
-        # Miękkie ograniczenie na n (granica toru)
         hw = self.track.track_width / 2
-        ocp.constraints.lbx   = np.array([-hw * 2.0]) # 2 razy luźniej, funkcja kosztu i tak ściągnie auto do środka
+        ocp.constraints.lbx   = np.array([-hw * 2.0])
         ocp.constraints.ubx   = np.array([ hw * 2.0])
-        ocp.constraints.idxbx = np.array([1])   # indeks n w wektorze x
+        ocp.constraints.idxbx = np.array([1])
 
-        # Stan początkowy
         ocp.constraints.x0 = np.zeros(6)
 
-        # Opcje solvera
-        ocp.solver_options.qp_solver        = 'PARTIAL_CONDENSING_HPIPM'
-        ocp.solver_options.hessian_approx    = 'GAUSS_NEWTON'
-        ocp.solver_options.integrator_type   = 'DISCRETE'
-        ocp.solver_options.nlp_solver_type   = 'SQP_RTI'   # real-time iteration
-        ocp.solver_options.print_level       = 0
+        #ocp.solver_options.qp_solver = 'FULL_CONDENSING_HPIPM'
+        ocp.solver_options.qp_solver      = 'PARTIAL_CONDENSING_HPIPM'
+        ocp.solver_options.hessian_approx = 'GAUSS_NEWTON'
+        ocp.solver_options.levenberg_marquardt   = 1e-3   # ← DODAĆ
+        ocp.solver_options.integrator_type = 'DISCRETE'
+        ocp.solver_options.nlp_solver_type = 'SQP_RTI'
+        ocp.solver_options.print_level     = 0
+        ocp.solver_options.qp_solver_iter_max   = 100    # domyślnie 50 
+        ocp.solver_options.qp_solver_warm_start = 1      # ciepły start QP między iteracjami SQP
 
         self._ocp_solver = AcadosOcpSolver(ocp, json_file='f1tenth_ocp.json')
         print("[MPC] Solver acados zbudowany pomyślnie.")
@@ -320,73 +315,90 @@ class MPCController:
         else:
             return self._solve_scipy(state)
 
+    # ── Pomocnicza: budowanie węża predykcyjnego ──────────────────────────
+
+    def _build_prediction_xy(self, state: np.ndarray,
+                              X_states: np.ndarray) -> None:
+        """
+        Konwertuje N+1 stanów Freneta (s, n) na kartezjańskie (X, Y)
+        i zapisuje wynik w self.prediction_xy.
+
+        Args:
+            state:    bieżący stan pojazdu [s, n, mu, vx, vy, r]
+            X_states: macierz kształtu (N+1, 6) – stany horyzontu
+                      (wiersz 0 = stan bieżący, wiersze 1..N = horyzont)
+        """
+        pts = np.zeros((self.N + 1, 2))
+        for k in range(self.N + 1):
+            s_k = float(X_states[k, 0])
+            n_k = float(X_states[k, 1])
+            X, Y, _ = self.track.frenet_to_cartesian(s_k, n_k)
+            pts[k, 0] = X
+            pts[k, 1] = Y
+        self.prediction_xy = pts
+
     def _solve_acados(self, state: np.ndarray) -> np.ndarray:
         """Rozwiązuje OCP za pomocą acados (SQP-RTI)."""
         solver = self._ocp_solver
-        kappa  = self.track.get_kappa(state[0])
 
-        # Ustaw stan początkowy
         solver.set(0, 'lbx', state)
         solver.set(0, 'ubx', state)
 
-        # Ustaw parametry (krzywizna) dla każdego kroku
         for k in range(self.N):
             s_k   = state[0] + k * self.dt * max(state[3], 0.5)
             kap_k = self.track.get_kappa(s_k)
             solver.set(k, 'p', np.array([kap_k]))
-
         solver.set(self.N, 'p', np.array([kap_k]))
 
-        # ─── POPRAWKA 1: Przesunięcie sterowań (Warm Start) ───
-        # Podobnie jak w scipy, przesuwamy macierz sterowań o 1 krok czasowy
         self.U_warm = np.roll(self.U_warm, -1, axis=0)
         self.U_warm[-1] = self.U_warm[-2]
 
-        # ─── POPRAWKA 2: Inicjalizacja stanów przez propagację nieliniową ───
-        # Jeśli GP jest aktywny, używamy batchowej predykcji resztek dla
-        # całego horyzontu (efektywniejsze niż N osobnych wywołań).
         x_current = state.copy()
+
         if self._gp_active:
-            # Zbierz stany i sterowania horyzontu do batcha GP
             X_horizon = np.zeros((self.N, 6))
             U_horizon = np.zeros((self.N, 2))
             x_prop = state.copy()
             for k in range(self.N):
                 X_horizon[k] = x_prop
                 U_horizon[k] = self.U_warm[k]
-                kap_k = self.track.get_kappa(x_prop[0])
+                kap_k  = self.track.get_kappa(x_prop[0])
                 x_prop = self.model.step_rk4(x_prop, self.U_warm[k], kap_k, self.dt)
+            
+            with max_cg_iterations(2000), cg_tolerance(0.05):
+                gp_residuals = self.gp_model.predict_residual_batch(X_horizon, U_horizon)
 
-            # Batchowa korekcja GP (jedna wspólna inferenca dla całego horyzontu)
-            gp_residuals = self.gp_model.predict_residual_batch(X_horizon, U_horizon)
-
-            # Inicjalizuj solver z GP-skorygowaną trajektorią
             x_current = state.copy()
+            X_pred = np.zeros((self.N + 1, 6))
+            X_pred[0] = state.copy()
             for k in range(self.N):
                 solver.set(k, "u", self.U_warm[k])
                 solver.set(k, "x", x_current)
-                kap_k = self.track.get_kappa(x_current[0])
-                x_nom = self.model.step_rk4(x_current, self.U_warm[k], kap_k, self.dt)
-                # Dodaj korekcję GP: x_{k+1} = f(x_k,u_k) + B_d·g(x_k,u_k)
+                kap_k  = self.track.get_kappa(x_current[0])
+                x_nom  = self.model.step_rk4(x_current, self.U_warm[k], kap_k, self.dt)
                 x_nom[[3, 4, 5]] += gp_residuals[k]
-                x_current = x_nom
+                x_current  = x_nom
+                X_pred[k+1] = x_current
         else:
+            X_pred = np.zeros((self.N + 1, 6))
+            X_pred[0] = state.copy()
             for k in range(self.N):
                 solver.set(k, "u", self.U_warm[k])
                 solver.set(k, "x", x_current)
-                # Wyznaczamy spójny fizycznie stan dla kolejnego kroku na horyzoncie
-                kap_k = self.track.get_kappa(x_current[0])
+                kap_k     = self.track.get_kappa(x_current[0])
                 x_current = self.model.step_rk4(x_current, self.U_warm[k], kap_k, self.dt)
+                X_pred[k+1] = x_current
 
-        solver.set(self.N, "x", x_current)  # Stan terminalny
+        solver.set(self.N, "x", x_current)
 
         status = solver.solve()
-        if status not in [0, 2]:   # 0=OK, 2=max_iter (akceptowalne w RTI)
-            print(f"[acados] status={status}, używam poprzedniego u")
+
+        if status not in [0, 2]:
+            print(f"[acados] status={status}, przechodzę na bezpieczny fallback i reset solvera")
 
             s, n, mu, vx, vy, r = state
             X, Y, psi_track = self.track.frenet_to_cartesian(s, n)
-            psi = psi_track + mu
+            psi     = psi_track + mu
             X_front = X + self.model.p.lf * np.cos(psi)
             Y_front = Y + self.model.p.lf * np.sin(psi)
 
@@ -396,28 +408,75 @@ class MPCController:
                 f"Xf={X_front:.3f}m | Yf={Y_front:.3f}m | psi={psi:.3f}rad | "
                 f"u_prev=[d={self.u_prev[0]:.3f}, delta={self.u_prev[1]*180/np.pi:.1f}°]"
             )
-            _, n, mu, vx, _, _ = state
-            delta_fb = float(np.clip(-3.0*n - 2.0*mu, -self.delta_max, self.delta_max))
-            d_fb     = float(np.clip(0.3 * (self.vx_ref - vx) + 0.2, 0.0, 1.0))
-            u_fallback = np.array([d_fb, delta_fb])
-            self.u_prev = u_fallback
-            # Zresetuj ciepły start żeby solver mógł zbiec od nowa
-            kappa0 = self.track.get_kappa(state[0])
-            delta0 = float(np.clip(self.model.p.lf * kappa0, -self.delta_max, self.delta_max))
-            self.U_warm = np.tile([0.3, delta0], (self.N, 1))
-            return u_fallback
-        # Pobierz pierwsze sterowanie
-        u_opt = solver.get(0, 'u')
 
-        # Zapisz ciepły start z aktualnego rozwiązania solvera
+            # Bezpieczne sterowanie awaryjne
+            _, n, mu, vx, _, _ = state
+            delta_fb   = float(np.clip(-3.0 * n - 2.0 * mu,
+                                    -self.delta_max, self.delta_max))
+            d_fb       = float(np.clip(0.3 * (self.vx_ref - vx) + 0.2,
+                                    self.d_min, self.d_max))
+            u_fallback = np.array([d_fb, delta_fb])
+
+            self.u_prev = u_fallback.copy()
+
+            # ── 1. Zresetuj warm start wejść ─────────────────────────────
+            kappa0 = self.track.get_kappa(state[0])
+            delta0 = float(np.clip(self.model.p.lf * kappa0,
+                                -self.delta_max, self.delta_max))
+            self.U_warm = np.tile(np.array([0.3, delta0]), (self.N, 1))
+
+            # ── 2. Twardy reset wewnętrznego solvera acados ─────────────
+            try:
+                solver.reset()
+            except Exception as e:
+                print(f"[acados] reset() nieudany: {e}")
+
+            # ── 3. Odbuduj spójną trajektorię stanów do inicjalizacji ────
+            x_safe = state.copy()
+            x_safe[3] = np.clip(x_safe[3], 0.2, 8.0)   # vx
+            x_safe[4] = np.clip(x_safe[4], -2.0, 2.0)  # vy
+            x_safe[5] = np.clip(x_safe[5], -4.0, 4.0)  # r
+
+            X_reinit = np.zeros((self.N + 1, 6))
+            X_reinit[0] = x_safe.copy()
+
+            for k in range(self.N):
+                kap_k = self.track.get_kappa(x_safe[0])
+
+                solver.set(k, "p", np.array([kap_k]))
+                solver.set(k, "x", x_safe)
+                solver.set(k, "u", self.U_warm[k])
+
+                x_safe = self.model.step_rk4(x_safe, self.U_warm[k], kap_k, self.dt)
+                x_safe[3] = np.clip(x_safe[3], 0.2, 8.0)
+                x_safe[4] = np.clip(x_safe[4], -2.0, 2.0)
+                x_safe[5] = np.clip(x_safe[5], -4.0, 4.0)
+
+                X_reinit[k + 1] = x_safe.copy()
+
+            solver.set(self.N, "x", X_reinit[-1])
+            solver.set(self.N, "p", np.array([self.track.get_kappa(X_reinit[-1, 0])]))
+
+            # ── 4. Wąż predykcyjny z bezpiecznej trajektorii ─────────────
+            self._build_prediction_xy(state, X_reinit)
+
+            return u_fallback
+
+        # Pobierz rozwiązanie z solvera i zbuduj węża z optymalnych stanów
+        X_opt = np.zeros((self.N + 1, 6))
+        X_opt[0] = state.copy()
         for k in range(self.N):
             self.U_warm[k] = solver.get(k, 'u')
+            X_opt[k+1]     = solver.get(k+1, 'x')
 
-        u_opt[0] = np.clip(u_opt[0], self.d_min,      self.d_max)
+        self._build_prediction_xy(state, X_opt)
+
+        u_opt    = solver.get(0, 'u')
+        u_opt[0] = np.clip(u_opt[0], self.d_min, self.d_max)
         u_opt[1] = np.clip(u_opt[1], -self.delta_max, self.delta_max)
         self.u_prev = u_opt.copy()
         return u_opt
-    
+
     def _solve_scipy(self, state: np.ndarray) -> np.ndarray:
         """Fallback: scipy L-BFGS-B (gdy acados niedostępny)."""
         from scipy.optimize import minimize
@@ -428,8 +487,8 @@ class MPCController:
 
         bounds = []
         for _ in range(self.N):
-            bounds.append((self.d_min,       self.d_max))
-            bounds.append((-self.delta_max,  self.delta_max))
+            bounds.append((self.d_min, self.d_max))
+            bounds.append((-self.delta_max, self.delta_max))
 
         result = minimize(
             fun=self._cost_scipy,
@@ -443,8 +502,26 @@ class MPCController:
         U_opt       = result.x.reshape(self.N, 2)
         self.U_warm = U_opt.copy()
 
+        # Propagacja trajektorii do węża predykcyjnego
+        X_pred    = np.zeros((self.N + 1, 6))
+        X_pred[0] = state.copy()
+        x_cur     = state.copy()
+        for k in range(self.N):
+            d_k     = np.clip(U_opt[k, 0], self.d_min, self.d_max)
+            delta_k = np.clip(U_opt[k, 1], -self.delta_max, self.delta_max)
+            u_k     = np.array([d_k, delta_k])
+            kappa   = self.track.get_kappa(x_cur[0])
+            x_nom   = self.model.step_rk4(x_cur, u_k, kappa, self.dt)
+            if self._gp_active:
+                resid, _ = self.gp_model.predict_residual(x_cur, u_k)
+                x_nom[[3, 4, 5]] += resid
+            x_cur       = x_nom
+            X_pred[k+1] = x_cur
+
+        self._build_prediction_xy(state, X_pred)
+
         u_opt    = U_opt[0].copy()
-        u_opt[0] = np.clip(u_opt[0], self.d_min,      self.d_max)
+        u_opt[0] = np.clip(u_opt[0], self.d_min, self.d_max)
         u_opt[1] = np.clip(u_opt[1], -self.delta_max, self.delta_max)
         self.u_prev = u_opt.copy()
         return u_opt
@@ -469,17 +546,17 @@ class MPCController:
             J += self.q_vx   * (vx - self.vx_ref)**2
             J += self.r_d    * d**2
             J += self.r_delta * delta**2
-            J += self.r_dd    * (d     - u_prev[0])**2
+            J += self.r_dd   * (d     - u_prev[0])**2
             J += self.r_ddelta * (delta - u_prev[1])**2
             if abs(n) > tw * 0.8:
                 J += 100.0 * (abs(n) - tw * 0.8)**2
 
-            kappa  = self.track.get_kappa(s)
-            x_nom  = self.model.step_rk4(x, u_k, kappa, self.dt)
+            kappa = self.track.get_kappa(s)
+            x_nom = self.model.step_rk4(x, u_k, kappa, self.dt)
 
-            # Korekcja GP: x_{k+1} = f(x_k, u_k) + B_d·g(x_k, u_k)
             if self._gp_active:
-                resid, _ = self.gp_model.predict_residual(x, u_k)
+                with max_cg_iterations(2000), cg_tolerance(0.05):
+                    resid, _ = self.gp_model.predict_residual(x, u_k)
                 x_nom[[3, 4, 5]] += resid
 
             x      = x_nom
@@ -488,7 +565,7 @@ class MPCController:
         s, n, mu, vx, vy, r = x
         J += 3 * self.q_n  * n**2
         J += 3 * self.q_mu * mu**2
-        J +=     self.q_vx * (vx - self.vx_ref)**2
+        J += self.q_vx     * (vx - self.vx_ref)**2
         return J
 
     def __call__(self, state: np.ndarray) -> np.ndarray:

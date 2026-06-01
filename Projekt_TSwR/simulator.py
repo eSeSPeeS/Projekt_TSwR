@@ -6,7 +6,9 @@ Klasa F1tenthSimulator — łączy model dynamiczny, tor i wizualizację.
 Nowości:
 - wizualizacja matplotlib w czasie rzeczywistym podczas symulacji,
 - parametr log_every określający co który krok wypisywać log,
-- końcowe wykresy i animacja pokazują się po symulacji.
+- końcowe wykresy i animacja pokazują się po symulacji,
+- WĄŻ PREDYKCYJNY: jeśli kontroler ma pole prediction_xy (MPCController),
+  na wykresie realtime rysowany jest zielony wąż przewidywanej trajektorii.
 """
 
 import numpy as np
@@ -33,40 +35,50 @@ class F1tenthSimulator:
                  vehicle_params: Optional[VehicleParams] = None,
                  dt: float = 0.02,
                  use_pybullet: bool = True):
-        self.track = track
+        self.track  = track
         self.params = vehicle_params or VehicleParams()
-        self.model = DynamicBicycleModel(self.params)
-        self.dt = dt
-        self.time = 0.0
+        self.model  = DynamicBicycleModel(self.params)
+        self.dt     = dt
+        self.time   = 0.0
 
         self.state_history: list = []
-        self.input_history: list = []
-        self.time_history: list = []
+        self.input_history:  list = []
+        self.time_history:   list = []
         self.state = np.zeros(6)
 
         self.use_pybullet = use_pybullet and PYBULLET_AVAILABLE
-        self.pb_client = None
-        self.car_id = None
+        self.pb_client    = None
+        self.car_id       = None
 
-        self._rt_fig = None
-        self._rt_ax = None
-        self._rt_title = None
-        self._rt_car_dot = None
-        self._rt_trail = None
-        self._rt_text = None
-        self._rt_enabled = False
+        # ── Realtime plot state ───────────────────────────────────────────
+        self._rt_fig      = None
+        self._rt_ax       = None
+        self._rt_title    = None
+        self._rt_car_dot  = None
+        self._rt_trail    = None
+        self._rt_text     = None
+        self._rt_enabled  = False
         self._rt_trail_len = 100
+
+        # Wąż predykcyjny – Line2D tworzony dynamicznie w _setup_realtime_plot
+        self._rt_snake    = None   # linia węża (zielona)
+        self._rt_snake_dots = None  # punkty węża (kółka)
+        self._controller_ref = None  # referencja do kontrolera (ustawiana w run())
 
         if self.use_pybullet:
             self._init_pybullet()
 
+    # ══════════════════════════════════════════════════════════════════════
+    # RESET / STEP / RUN
+    # ══════════════════════════════════════════════════════════════════════
+
     def reset(self, s0: float = 1.0, n0: float = 0.0,
               mu0: float = 0.0, vx0: float = 1.0) -> np.ndarray:
         self.state = np.array([s0, n0, mu0, vx0, 0.0, 0.0], dtype=float)
-        self.time = 0.0
+        self.time  = 0.0
         self.state_history = [self.state.copy()]
-        self.input_history = []
-        self.time_history = [0.0]
+        self.input_history  = []
+        self.time_history   = [0.0]
 
         if self.use_pybullet and self.car_id is not None:
             X, Y, psi = self.track.frenet_to_cartesian(s0, n0)
@@ -83,18 +95,18 @@ class F1tenthSimulator:
         return self.state.copy()
 
     def step(self, u: np.ndarray) -> Tuple[np.ndarray, dict]:
-        u = np.asarray(u, dtype=float)
+        u     = np.asarray(u, dtype=float)
         kappa = self.track.get_kappa(self.state[0])
 
-        self.state = self.model.step_rk4(self.state, u, kappa, self.dt)
-        self.time += self.dt
+        self.state  = self.model.step_rk4(self.state, u, kappa, self.dt)
+        self.time  += self.dt
 
         self.state_history.append(self.state.copy())
         self.input_history.append(u.copy())
         self.time_history.append(self.time)
 
         info = {
-            "kappa": kappa,
+            "kappa":        kappa,
             "lap_progress": self.state[0] / self.track.total_length,
             "out_of_bounds": abs(self.state[1]) > self.track.track_width / 2,
         }
@@ -112,9 +124,13 @@ class F1tenthSimulator:
             realtime_plot: bool = False,
             realtime_interval_steps: int = 1,
             realtime_pause: float = 0.001) -> dict:
+
         oob = 0
-        log_every = max(1, int(log_every))
+        log_every               = max(1, int(log_every))
         realtime_interval_steps = max(1, int(realtime_interval_steps))
+
+        # Zachowaj referencję do kontrolera – potrzebna dla węża predykcyjnego
+        self._controller_ref = controller
 
         if realtime_plot:
             self._setup_realtime_plot()
@@ -130,7 +146,7 @@ class F1tenthSimulator:
             if verbose and i % log_every == 0:
                 s, n, mu, vx, vy, r = self.state
                 X, Y, psi_track = self.track.frenet_to_cartesian(s, n)
-                psi = psi_track + mu
+                psi     = psi_track + mu
                 X_front = X + self.params.lf * np.cos(psi)
                 Y_front = Y + self.params.lf * np.sin(psi)
                 print(
@@ -159,8 +175,12 @@ class F1tenthSimulator:
         return {
             "states": np.array(self.state_history),
             "inputs": np.array(self.input_history),
-            "times": np.array(self.time_history),
+            "times":  np.array(self.time_history),
         }
+
+    # ══════════════════════════════════════════════════════════════════════
+    # PYBULLET
+    # ══════════════════════════════════════════════════════════════════════
 
     def _init_pybullet(self):
         try:
@@ -188,7 +208,6 @@ class F1tenthSimulator:
                 basePosition=[0, 0, 0.05],
                 physicsClientId=self.pb_client,
             )
-
             self._draw_track_pybullet()
             pb.resetDebugVisualizerCamera(
                 cameraDistance=8,
@@ -251,6 +270,10 @@ class F1tenthSimulator:
                 pass
             self.pb_client = None
 
+    # ══════════════════════════════════════════════════════════════════════
+    # REALTIME PLOT (z wężem predykcyjnym)
+    # ══════════════════════════════════════════════════════════════════════
+
     def _setup_realtime_plot(self):
         if self._rt_fig is not None:
             self._rt_enabled = True
@@ -265,19 +288,28 @@ class F1tenthSimulator:
         ax.fill(
             np.concatenate([lx, rx[::-1]]),
             np.concatenate([ly, ry[::-1]]),
-            alpha=0.10,
-            color='gray',
+            alpha=0.10, color='gray',
         )
         ax.plot(self.track.x, self.track.y, 'y--', lw=1, alpha=0.7, label='centerline')
         ax.plot(lx, ly, 'k-', lw=1.5, alpha=0.6)
         ax.plot(rx, ry, 'k-', lw=1.5, alpha=0.6)
 
-        self._rt_trail, = ax.plot([], [], 'b-', lw=1.8, alpha=0.8, label='trajektoria')
-        self._rt_car_dot, = ax.plot([], [], 'ro', ms=8, zorder=10, label='pojazd')
+        self._rt_trail,     = ax.plot([], [], 'b-',  lw=1.8, alpha=0.8,  label='trajektoria')
+        self._rt_car_dot,   = ax.plot([], [], 'ro',  ms=10,  zorder=10,  label='pojazd')
+
+        # ── Wąż predykcyjny ──────────────────────────────────────────────
+        # Linia łącząca punkty horyzontu
+        self._rt_snake,     = ax.plot([], [], color='#00cc44', lw=2.0,
+                                      alpha=0.85, zorder=8, label='predykcja MPC')
+        # Kółka na każdym kroku horyzontu
+        self._rt_snake_dots, = ax.plot([], [], 'o', color='#00cc44',
+                                       ms=4, alpha=0.7, zorder=9)
+
         self._rt_title = ax.set_title('Symulacja w czasie rzeczywistym')
-        self._rt_text = ax.text(
+        self._rt_text  = ax.text(
             0.02, 0.98, '', transform=ax.transAxes,
             va='top', ha='left',
+            fontsize=8,
             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8),
         )
 
@@ -287,7 +319,7 @@ class F1tenthSimulator:
         ax.set_xlabel('X [m]')
         ax.set_ylabel('Y [m]')
         ax.grid(True, alpha=0.3)
-        ax.legend(loc='upper right')
+        ax.legend(loc='upper right', fontsize=8)
         plt.tight_layout()
         self._rt_enabled = True
         self._rt_fig.canvas.draw_idle()
@@ -308,19 +340,38 @@ class F1tenthSimulator:
         self._rt_trail.set_data(xs, ys)
         self._rt_car_dot.set_data([Xc], [Yc])
 
+        # ── Wąż predykcyjny ──────────────────────────────────────────────
+        ctrl = self._controller_ref
+        if (ctrl is not None
+                and hasattr(ctrl, 'prediction_xy')
+                and ctrl.prediction_xy is not None
+                and len(ctrl.prediction_xy) > 1):
+            px = ctrl.prediction_xy[:, 0]
+            py = ctrl.prediction_xy[:, 1]
+            self._rt_snake.set_data(px, py)
+            self._rt_snake_dots.set_data(px, py)
+        else:
+            # Kontroler bez predykcji – ukryj węża
+            self._rt_snake.set_data([], [])
+            self._rt_snake_dots.set_data([], [])
+
         s, n, mu, vx, vy, r = states[-1]
         self._rt_title.set_text('Symulacja w czasie rzeczywistym')
         self._rt_text.set_text(
-            f"t = {self.time:.2f} s\n"
-            f"s = {s:.2f} m\n"
-            f"n = {n:.3f} m\n"
+            f"t  = {self.time:.2f} s\n"
+            f"s  = {s:.2f} m\n"
+            f"n  = {n:.3f} m\n"
             f"mu = {mu:.3f} rad\n"
             f"vx = {vx:.2f} m/s"
         )
 
         if force:
             self._rt_fig.canvas.draw_idle()
-        self._rt_fig.canvas.flush_events()
+            self._rt_fig.canvas.flush_events()
+
+    # ══════════════════════════════════════════════════════════════════════
+    # MATPLOTLIB – wykresy końcowe i animacja
+    # ══════════════════════════════════════════════════════════════════════
 
     def plot_trajectory(self):
         if len(self.state_history) < 2:
@@ -348,7 +399,7 @@ class F1tenthSimulator:
         sc = ax.scatter(xs, ys, c=vx_vals, cmap='plasma', s=8, zorder=5)
         plt.colorbar(sc, ax=ax, label='vx [m/s]')
 
-        ax.plot(xs[0], ys[0], 'go', ms=10, zorder=6, label='start')
+        ax.plot(xs[0],  ys[0],  'go', ms=10, zorder=6, label='start')
         ax.plot(xs[-1], ys[-1], 'r^', ms=10, zorder=6, label='koniec')
 
         ax.set_aspect('equal')
@@ -367,7 +418,7 @@ class F1tenthSimulator:
 
         states = np.array(self.state_history)
         inputs = np.array(self.input_history)
-        times = np.array(self.time_history)
+        times  = np.array(self.time_history)
 
         fig, axes = plt.subplots(4, 2, figsize=(14, 12))
         fig.suptitle("Historia symulacji F1/10", fontsize=14, fontweight='bold')
@@ -385,7 +436,7 @@ class F1tenthSimulator:
             ax.grid(True, alpha=0.3)
             if i == 1:
                 hw = self.track.track_width / 2
-                ax.axhline(hw, color='red', ls='--', alpha=0.6, label='granica')
+                ax.axhline( hw, color='red', ls='--', alpha=0.6, label='granica')
                 ax.axhline(-hw, color='red', ls='--', alpha=0.6)
                 ax.legend(fontsize=8)
 
@@ -418,9 +469,9 @@ class F1tenthSimulator:
         ax.plot(lx, ly, 'k-', lw=1.5, alpha=0.5)
         ax.plot(rx, ry, 'k-', lw=1.5, alpha=0.5)
 
-        trail, = ax.plot([], [], 'b-', lw=1.5, alpha=0.7)
-        car_dot, = ax.plot([], [], 'ro', ms=10, zorder=10)
-        title = ax.set_title('')
+        trail,    = ax.plot([], [], 'b-', lw=1.5, alpha=0.7)
+        car_dot,  = ax.plot([], [], 'ro', ms=10,  zorder=10)
+        title      = ax.set_title('')
 
         ax.set_xlim(xs.min() - 1, xs.max() + 1)
         ax.set_ylim(ys.min() - 1, ys.max() + 1)
@@ -438,6 +489,7 @@ class F1tenthSimulator:
             )
             return trail, car_dot, title
 
-        ani = FuncAnimation(fig, update, frames=len(xs), interval=interval_ms, blit=True)
+        ani = FuncAnimation(fig, update, frames=len(xs),
+                            interval=interval_ms, blit=True)
         plt.tight_layout()
         return ani

@@ -6,41 +6,31 @@ Gaussowski model resztkowy (GP Residual Model) dla symulatora F1/10.
 Inspiracja: Lahr et al., "L4acados: Learning-based models for acados,
 applied to Gaussian process-based predictive control", arXiv:2411.19258
 
-Architektura:
-─────────────
-  • GP uczy się resztek modelu dynamicznego na prędkościach bocznych
-    i kątowych: docelowe stany to [vx, vy, r] (3 niezależne GP).
+Architektura po analizie danych:
+─────────────────────────────────
+Format pliku .npz (ustalony przez analizę dataset_reader_sens.py):
+  x0[:, :6]  = stan pojazdu [s, n, mu, vx, vy, r]
+  x0[:, 6]   = vx_target  – cel prędkości z MPC (koreluje z napędem)
+  x0[:, 7]   = delta      – kąt skrętu zastosowany do pojazdu
+  u0s        = [vx_opt, delta_opt] – pierwsze sterowanie z solvera MPC
 
-  • Wejścia (features) GP: [vx, vy, r, d, delta] — te same co w papierze
-    (sekcja IV-D), bez składowych pozycyjnych s/n/mu, bo te zależą
-    od toru a nie od dynamiki pojazdu.
+Wejścia GP (features): [vx, vy, r, delta, vx_target]
+  vx_target jest kluczową cechą dla predykcji dvx (R²=0.69).
+  delta jest główną cechą dla dvy i dr (R²~0.30).
 
-  • Bd: macierz 6×3 — tylko składowe [vx, vy, r] są korygowane przez GP.
-    Analogicznie do Bd^T = [0_{3×3}, I_{3×3}] z papieru.
+Wyjście GP (targets): resztka modelu nominalnego dla [vx, vy, r]
+  resid = x_next[vx,vy,r] - f_nom(x, d_proxy, delta)[vx,vy,r]
+  gdzie d_proxy = clip(vx_target / vx_scale, 0, 1), vx_scale dobierane
+  tak by residua były możliwie małe (GP uczy się tylko korekty, nie całości).
 
-  • Trening odbywa się na plikach .npz z folderu f1enth_long_track_sens.
-    Każdy krok czasowy daje jedną próbkę: (x_t, u_t) → resid_{t+1}.
-
-Użycie:
-───────
-    from gaussian import GPResidualModel
-
-    # Trening
-    gp = GPResidualModel()
-    gp.train_from_npz(list_of_npz_paths, track, dt=0.02)
-    gp.save("gp_model.pt")
-
-    # Predykcja (korekta MPC)
-    x_corrected = gp.correct_state(x_nominal, x_state, u_input)
-
-    # Integracja z MPCController
-    mpc = MPCController(..., gp_model=gp)
+Integracja z MPC:
+  x_{k+1}[vx,vy,r] = f_nom(x_k, u_k)[vx,vy,r] + GP(x_k, u_k)
+  Korekta GP jest małą poprawką; gdy GP jest wyłączony działa czysty MPC.
 """
 
 from __future__ import annotations
 
 import os
-import warnings
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -48,27 +38,26 @@ import numpy as np
 import torch
 import gpytorch
 from gpytorch.models import ExactGP
-from gpytorch.likelihoods import GaussianLikelihood, MultitaskGaussianLikelihood
-from gpytorch.kernels import RBFKernel, ScaleKernel, MaternKernel
-from gpytorch.distributions import MultivariateNormal, MultitaskMultivariateNormal
-from gpytorch.means import ConstantMean, ZeroMean
-from gpytorch.mlls import ExactMarginalLogLikelihood, SumMarginalLogLikelihood
+from gpytorch.likelihoods import GaussianLikelihood
+from gpytorch.kernels import ScaleKernel, MaternKernel
+from gpytorch.distributions import MultivariateNormal
+from gpytorch.means import ZeroMean
+from gpytorch.mlls import ExactMarginalLogLikelihood
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Stałe
 # ══════════════════════════════════════════════════════════════════════════════
 
-#: Wymiary wektora stanu [s, n, mu, vx, vy, r]
-NX = 6
-#: Wymiary wektora sterowania [d, delta]
-NU = 2
-#: Indeksy stanów korygowanych przez GP (vx=3, vy=4, r=5)
-GP_OUTPUT_IDX = [3, 4, 5]
-#: Rozmiar wyjścia GP
-N_GP_OUTPUTS = len(GP_OUTPUT_IDX)  # 3
-#: Rozmiar wejścia GP (features: vx, vy, r, d, delta)
-N_GP_FEATURES = 5
+NX            = 6                # [s, n, mu, vx, vy, r]
+NU            = 2                # [d, delta]
+GP_OUTPUT_IDX = [3, 4, 5]       # indeksy [vx, vy, r] w wektorze stanu
+N_GP_OUTPUTS  = 3               # vx, vy, r
+N_GP_FEATURES = 5               # [vx, vy, r, delta, vx_target]
+
+# Skala zamiany vx_target → d_proxy (d_proxy = clip(vx_target/VX_SCALE, 0, 1))
+# Dobrana jako typowa prędkość maksymalna z danych (~5 m/s)
+VX_SCALE      = 5.0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -78,73 +67,112 @@ N_GP_FEATURES = 5
 def load_npz_residuals(
     npz_path: Path,
     vehicle_model,
-    track,
     dt: float = 0.02,
     min_vx: float = 0.5,
+    max_residual: float = 1.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Wczytuje jeden plik .npz i oblicza resztki modelu nominalnego.
+    Wczytuje plik .npz i oblicza resztki modelu nominalnego dla GP.
 
-    Dane wejściowe (features) GP:
-        z = [vx, vy, r, d, delta]   (shape: T×5)
+    Format danych (ustalony przez dataset_reader_sens.py):
+      x0[:, :6] = stan [s, n, mu, vx, vy, r]
+      x0[:,  6] = vx_target (cel prędkości z MPC – proxy dla napędu)
+      x0[:,  7] = delta_applied (kąt skrętu zastosowany do pojazdu)
 
-    Dane wyjściowe (targets) GP:
-        y = x_{t+1}[vx,vy,r] - f(x_t, u_t)[vx,vy,r]   (shape: T×3)
+    Features GP:  z = [vx, vy, r, delta, vx_target]   (N_GP_FEATURES=5)
+    Targets  GP:  y = x_{t+1}[vx,vy,r] - f_nom(x_t, u_proxy_t)[vx,vy,r]
+
+    Proxy sterowania dla modelu nominalnego:
+      d_proxy = clip(vx_target / VX_SCALE, 0, 1)
+      delta   = delta_applied
 
     Args:
-        npz_path:      ścieżka do pliku .npz
-        vehicle_model: instancja DynamicBicycleModel
-        track:         instancja TrackCenterline (do pobierania kappa)
-        dt:            krok czasowy [s]
-        min_vx:        minimalny vx (odfiltrowanie startu/stopu)
+        npz_path:     ścieżka do pliku .npz
+        vehicle_model: DynamicBicycleModel (model nominalny)
+        dt:           krok czasowy [s]
+        min_vx:       minimalne vx do filtrowania (start/stop)
+        max_residual: próg odfiltrowania outlierów
 
     Returns:
-        (features, targets) – gotowe numpy arrays
+        (features, targets) – numpy arrays kształtu (N, 5) i (N, 3)
     """
-    data = np.load(str(npz_path), allow_pickle=True)
+    data  = np.load(str(npz_path), allow_pickle=True)
+    x0    = data['x0']           # (T, 8)
+    valid = data['sens_valid']   # (T,) bool
 
-    x0  = data['x0'][:, :6]   # (T, 6): [s, n, mu, vx, vy, r]
-    u0s = data['u0s']          # (T, 2): [d, delta]
-    valid = data['sens_valid'] # (T,): bool
+    state      = x0[:, :6]      # [s, n, mu, vx, vy, r]
+    vx_target  = x0[:, 6]      # vx_target z MPC
+    delta_app  = x0[:, 7]      # delta zastosowane
 
-    features_list = []
-    targets_list  = []
+    features_list: List[np.ndarray] = []
+    targets_list:  List[np.ndarray] = []
 
-    for t in range(len(x0) - 1):
+    for t in range(len(state) - 1):
         if not valid[t]:
             continue
 
-        x_t = x0[t]
-        u_t = u0s[t]
-        x_next = x0[t + 1]
+        x_t    = state[t]
+        x_next = state[t + 1]
+        vxt    = vx_target[t]
+        dlt    = delta_app[t]
 
-        # Odfiltruj punkty przy zbyt małej prędkości
+        # Filtruj za małe prędkości
         if x_t[3] < min_vx or x_next[3] < min_vx:
             continue
 
-        # Krzywizna w bieżącej pozycji
-        kappa = track.get_kappa(x_t[0])
+        # Proxy sterowania dla modelu nominalnego
+        d_proxy = float(np.clip(vxt / VX_SCALE, 0.0, 1.0))
+        u_proxy = np.array([d_proxy, dlt])
 
-        # Jeden krok modelu nominalnego
-        x_nom_next = vehicle_model.step_rk4(x_t, u_t, kappa, dt)
+        # Jeden krok modelu nominalnego (kappa=0: vx/vy/r nie zależą od kappa)
+        x_nom_next = vehicle_model.step_rk4(x_t, u_proxy, 0.0, dt)
 
-        # Resztka: tylko składowe [vx, vy, r]
+        # Resztka: rzeczywiste - nominalne dla [vx, vy, r]
         residual = x_next[GP_OUTPUT_IDX] - x_nom_next[GP_OUTPUT_IDX]
 
-        # Filtruj outlierów (błędy > 5× odch. stand. heurystycznie)
-        if np.any(np.abs(residual) > 2.0):
+        # Odfiltruj outlierów
+        if np.any(np.abs(residual) > max_residual):
             continue
 
-        # Feature: [vx, vy, r, d, delta]
-        z = np.array([x_t[3], x_t[4], x_t[5], u_t[0], u_t[1]], dtype=np.float32)
+        # Feature: [vx, vy, r, delta, vx_target]
+        z = np.array([x_t[3], x_t[4], x_t[5], dlt, vxt], dtype=np.float32)
 
         features_list.append(z)
         targets_list.append(residual.astype(np.float32))
 
-    if len(features_list) == 0:
-        return np.zeros((0, N_GP_FEATURES), np.float32), np.zeros((0, N_GP_OUTPUTS), np.float32)
+    if not features_list:
+        empty_f = np.zeros((0, N_GP_FEATURES), np.float32)
+        empty_t = np.zeros((0, N_GP_OUTPUTS),  np.float32)
+        return empty_f, empty_t
 
     return np.vstack(features_list), np.vstack(targets_list)
+
+
+def extract_features_from_state(
+    x_state: np.ndarray,
+    u_input: np.ndarray,
+) -> np.ndarray:
+    """
+    Buduje wektor cech GP z bieżącego stanu i sterowania MPC.
+
+    Mapowanie: (x, u) -> z = [vx, vy, r, delta, vx_target]
+      vx_target = d_mpc * VX_SCALE  (odwrotność proxy z treningu)
+
+    Args:
+        x_state: stan pojazdu [s, n, mu, vx, vy, r]
+        u_input: sterowanie MPC [d, delta]
+
+    Returns:
+        z: wektor cech (5,)
+    """
+    vx, vy, r = x_state[3], x_state[4], x_state[5]
+    d, delta  = u_input[0], u_input[1]
+
+    # Odwróć proxy: d_proxy = vx_target / VX_SCALE => vx_target = d * VX_SCALE
+    # Klipujemy d do [0,1] jak w modelu nominalnym
+    vx_target = float(np.clip(d, 0.0, 1.0)) * VX_SCALE
+
+    return np.array([vx, vy, r, delta, vx_target], dtype=np.float32)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -153,24 +181,22 @@ def load_npz_residuals(
 
 class _SingleOutputGP(ExactGP):
     """
-    Dokładny GP z kernelem Matérn-5/2 i Automatic Relevance Determination.
-
-    Matérn-5/2 jest preferowany w robotyce bo modeluje funkcje ciągłe
-    ze skokowymi gradientami (np. efekty poślizgu opon).
+    Dokładny GP z kernelem Matérn-5/2 i ARD.
+    Matérn-5/2 modeluje funkcje z ograniczonymi gradientami –
+    odpowiednie dla dynamiki opon.
     """
 
     def __init__(self, train_x: torch.Tensor, train_y: torch.Tensor,
                  likelihood: GaussianLikelihood):
         super().__init__(train_x, train_y, likelihood)
-        self.mean_module = ZeroMean()
+        self.mean_module  = ZeroMean()
         self.covar_module = ScaleKernel(
             MaternKernel(nu=2.5, ard_num_dims=N_GP_FEATURES)
         )
 
     def forward(self, x: torch.Tensor) -> MultivariateNormal:
-        mean  = self.mean_module(x)
-        covar = self.covar_module(x)
-        return MultivariateNormal(mean, covar)
+        return MultivariateNormal(self.mean_module(x),
+                                  self.covar_module(x))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -179,187 +205,170 @@ class _SingleOutputGP(ExactGP):
 
 class GPResidualModel:
     """
-    Model resztkowy oparty na procesach Gaussa dla F1/10.
+    Model resztkowy GP dla F1/10 – poprawia predykcję [vx, vy, r].
 
-    Trenuje 3 niezależne GP (jeden na każdą składową [vx, vy, r]).
-    Podczas predykcji poprawia następny stan wyjściowy modelu nominalnego.
+    Trzy niezależne GP (po jednym na vx, vy, r).
+    Cechy wejściowe: [vx, vy, r, delta, vx_target].
+    Cel: resztka modelu nominalnego.
 
-    Atrybuty:
-        enabled:   bool – czy GP jest aktywny (False = czysty MPC)
-        trained:   bool – czy GP ma wytrenowane dane
-        max_data:  int  – maksymalna liczba punktów treningowych
-        device:    str  – 'cpu' lub 'cuda'
+    Użycie:
+        gp = GPResidualModel(enabled=True, max_data=1000)
+        gp.train_from_npz(paths, vehicle_model, dt=0.02)
+        gp.save("gp_model.pt")
 
-    Przykład:
-        gp = GPResidualModel(max_data=500, device='cpu')
-        gp.train_from_npz(paths, track, vehicle_model, dt=0.02)
-        x_corrected = gp.correct_state(x_nominal, x_current, u)
+        # w pętli sterowania:
+        x_next_corrected = gp.correct_state(x_nom_next, x_current, u)
     """
 
     def __init__(self,
-                 enabled:   bool = True,
-                 max_data:  int  = 2500,
-                 device:    str  = 'cpu',
-                 n_train_iter: int = 1000):
-        """
-        Args:
-            enabled:      True = GP aktywny, False = brak korekcji
-            max_data:     maks. liczba punktów treningowych (subsample)
-            device:       'cpu' lub 'cuda' (dla GPU)
-            n_train_iter: liczba iteracji optymalizacji hiperparametrów
-        """
-        self.enabled       = enabled
-        self.max_data      = max_data
-        self.device        = torch.device(device)
-        self.n_train_iter  = n_train_iter
-        self.trained       = False
+                 enabled:      bool = True,
+                 max_data:     int  = 1000,
+                 device:       str  = 'cpu',
+                 n_train_iter: int  = 150):
+        self.enabled      = enabled
+        self.max_data     = max_data
+        self.device       = torch.device(device)
+        self.n_train_iter = n_train_iter
+        self.trained      = False
 
-        self._models: List[_SingleOutputGP]     = []
-        self._likelihoods: List[GaussianLikelihood] = []
+        self._models:      List[_SingleOutputGP]     = []
+        self._likelihoods: List[GaussianLikelihood]  = []
 
-        # Statystyki normalizacji
         self._feat_mean: Optional[np.ndarray] = None
         self._feat_std:  Optional[np.ndarray] = None
 
-        print(f"[GP] Inicjalizacja: enabled={enabled}, max_data={max_data}, device={device}")
+        print(f"[GP] Inicjalizacja: enabled={enabled}, "
+              f"max_data={max_data}, device={device}")
 
-    # ── Normalizacja cech ─────────────────────────────────────────────────
+    # ── Normalizacja ──────────────────────────────────────────────────────
+
+    def _fit_normalizer(self, X: np.ndarray) -> None:
+        self._feat_mean = X.mean(axis=0).astype(np.float32)
+        self._feat_std  = X.std(axis=0).astype(np.float32)
+        self._feat_std  = np.where(self._feat_std < 1e-6, 1.0, self._feat_std)
 
     def _normalize(self, X: np.ndarray) -> np.ndarray:
-        """Standaryzuje features do N(0,1)."""
         if self._feat_mean is None:
             return X
-        return (X - self._feat_mean) / (self._feat_std + 1e-8)
-
-    def _fit_normalizer(self, X: np.ndarray):
-        self._feat_mean = X.mean(axis=0)
-        self._feat_std  = X.std(axis=0)
-        self._feat_std  = np.where(self._feat_std < 1e-6, 1.0, self._feat_std)
+        return ((X - self._feat_mean) / self._feat_std).astype(np.float32)
 
     # ── Trening ───────────────────────────────────────────────────────────
 
     def train_from_npz(
         self,
         npz_paths: List[Path],
-        track,
         vehicle_model,
-        dt: float = 0.02,
-        verbose: bool = True,
+        dt:      float = 0.02,
+        verbose: bool  = True,
     ) -> None:
         """
-        Trenuje GP na zebranych danych z plików .npz.
+        Trenuje GP na plikach .npz.
 
         Args:
-            npz_paths:     lista ścieżek do plików .npz
-            track:         TrackCenterline (do kappa)
+            npz_paths:     lista ścieżek .npz
             vehicle_model: DynamicBicycleModel (model nominalny)
-            dt:            krok czasowy symulacji [s]
+            dt:            krok czasowy [s]
             verbose:       wypisuj postęp
         """
         if not self.enabled:
             print("[GP] GP wyłączony – pomijam trening.")
             return
 
-        print(f"\n[GP] Ładowanie danych z {len(npz_paths)} pliku/plików...")
-        all_features = []
-        all_targets  = []
+        print(f"\n[GP] Wczytywanie danych z {len(npz_paths)} pliku/plików...")
+        all_X, all_Y = [], []
 
         for path in npz_paths:
             path = Path(path)
             if not path.exists():
-                print(f"[GP]   UWAGA: plik nie istnieje: {path}")
+                print(f"[GP]   BRAK: {path}")
                 continue
-            feat, targ = load_npz_residuals(path, vehicle_model, track, dt)
-            if feat.shape[0] == 0:
-                print(f"[GP]   {path.name}: brak danych po filtrowaniu")
+            X_i, Y_i = load_npz_residuals(path, vehicle_model, dt)
+            if X_i.shape[0] == 0:
+                print(f"[GP]   {path.name}: 0 próbek po filtrowaniu")
                 continue
-            all_features.append(feat)
-            all_targets.append(targ)
+            all_X.append(X_i)
+            all_Y.append(Y_i)
             if verbose:
-                print(f"[GP]   {path.name}: {feat.shape[0]} próbek  "
-                      f"(resid vx={targ[:,0].std():.4f}, "
-                      f"vy={targ[:,1].std():.4f}, "
-                      f"r={targ[:,2].std():.4f})")
+                print(f"[GP]   {path.name}: {X_i.shape[0]} próbek  "
+                      f"resid std=[vx:{Y_i[:,0].std():.4f}, "
+                      f"vy:{Y_i[:,1].std():.4f}, "
+                      f"r:{Y_i[:,2].std():.4f}]")
 
-        if len(all_features) == 0:
-            print("[GP] BŁĄD: brak danych do treningu!")
+        if not all_X:
+            print("[GP] Brak danych!")
             return
 
-        X = np.vstack(all_features)  # (N_total, 5)
-        Y = np.vstack(all_targets)   # (N_total, 3)
+        X = np.vstack(all_X)
+        Y = np.vstack(all_Y)
 
-        # Subsample jeśli za dużo danych
+        # Wypisz rozkład resztek przed subsamplowaniem
+        if verbose:
+            print(f"[GP] Łącznie {X.shape[0]} próbek")
+            for i, n in enumerate(['vx', 'vy', 'r']):
+                print(f"[GP]   resid_{n}: mean={Y[:,i].mean():.4f}  "
+                      f"std={Y[:,i].std():.4f}  "
+                      f"max|r|={np.abs(Y[:,i]).max():.4f}")
+
+        # Subsampling
         if X.shape[0] > self.max_data:
             idx = np.random.choice(X.shape[0], self.max_data, replace=False)
             X, Y = X[idx], Y[idx]
             if verbose:
-                print(f"[GP] Subsample → {self.max_data} punktów treningowych")
-        else:
-            if verbose:
-                print(f"[GP] Łączna liczba próbek: {X.shape[0]}")
+                print(f"[GP] Subsampling → {self.max_data} punktów")
 
-        # Normalizacja features
+        # Normalizacja cech
         self._fit_normalizer(X)
         X_norm = self._normalize(X)
 
-        # Buduj i trenuj 3 niezależne GP
-        self._models      = []
-        self._likelihoods = []
-
+        # Trening 3 niezależnych GP
+        self._models, self._likelihoods = [], []
         output_names = ['vx', 'vy', 'r']
 
         for i, name in enumerate(output_names):
-            y_i = Y[:, i]
-
+            y_i    = Y[:, i]
             train_x = torch.tensor(X_norm, dtype=torch.float32).to(self.device)
             train_y = torch.tensor(y_i,    dtype=torch.float32).to(self.device)
 
             likelihood = GaussianLikelihood().to(self.device)
-            gp_model   = _SingleOutputGP(train_x, train_y, likelihood).to(self.device)
+            gp         = _SingleOutputGP(train_x, train_y, likelihood).to(self.device)
 
-            gp_model.train()
-            likelihood.train()
-
+            gp.train(); likelihood.train()
             optimizer = torch.optim.Adam(
-                list(gp_model.parameters()) + list(likelihood.parameters()),
-                lr=0.05
-            )
-            mll = ExactMarginalLogLikelihood(likelihood, gp_model)
+                list(gp.parameters()) + list(likelihood.parameters()), lr=0.05)
+            mll = ExactMarginalLogLikelihood(likelihood, gp)
 
             if verbose:
-                print(f"[GP]   Trenuję GP_{name} ({self.n_train_iter} iter)...", end="", flush=True)
+                print(f"[GP]   Trenuję GP_{name}...", end="", flush=True)
 
             prev_loss = float('inf')
             for it in range(self.n_train_iter):
                 optimizer.zero_grad()
-                output = gp_model(train_x)
-                loss   = -mll(output, train_y)
+                out  = gp(train_x)
+                loss = -mll(out, train_y)
                 loss.backward()
                 optimizer.step()
-
-                # Wczesne zatrzymanie jeśli strata zbieżna
-                if it > 20 and abs(prev_loss - loss.item()) < 1e-5:
+                if it > 30 and abs(prev_loss - loss.item()) < 1e-5:
                     if verbose:
-                        print(f" (zbieżność po {it+1} iter)", end="")
+                        print(f" (zbieżność @ iter {it+1})", end="")
                     break
                 prev_loss = loss.item()
 
             if verbose:
-                lengthscales = gp_model.covar_module.base_kernel.lengthscale.detach().cpu().numpy().flatten()
+                ls = gp.covar_module.base_kernel.lengthscale \
+                       .detach().cpu().numpy().flatten()
                 noise = likelihood.noise.item()
-                print(f" loss={loss.item():.4f}, noise={noise:.4f}")
-                feat_labels = ['vx', 'vy', 'r', 'd', 'delta']
-                ls_str = ", ".join(f"{feat_labels[j]}:{lengthscales[j]:.3f}" for j in range(len(lengthscales)))
-                print(f"[GP]     lengthscales=({ls_str})")
+                feat_l = ['vx','vy','r','delta','vx_tgt']
+                ls_str = ", ".join(f"{feat_l[j]}:{ls[j]:.3f}"
+                                   for j in range(len(ls)))
+                print(f" loss={loss.item():.4f}, noise={noise:.5f}")
+                print(f"[GP]     ls=({ls_str})")
 
-            gp_model.eval()
-            likelihood.eval()
-
-            self._models.append(gp_model)
+            gp.eval(); likelihood.eval()
+            self._models.append(gp)
             self._likelihoods.append(likelihood)
 
         self.trained = True
-        print("[GP] Trening zakończony pomyślnie.\n")
+        print("[GP] Trening zakończony.\n")
 
     # ── Predykcja ─────────────────────────────────────────────────────────
 
@@ -370,41 +379,34 @@ class GPResidualModel:
         return_variance: bool = False,
     ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         """
-        Przewiduje resztkę [vx, vy, r] dla podanego stanu i sterowania.
+        Przewiduje resztkę [vx, vy, r] dla jednego punktu.
 
         Args:
-            x_state:         stan pojazdu [s, n, mu, vx, vy, r]
-            u_input:         sterowanie [d, delta]
-            return_variance: czy zwracać wariancję predykcji
+            x_state: stan [s, n, mu, vx, vy, r]
+            u_input: sterowanie MPC [d, delta]
+            return_variance: czy zwracać wariancję
 
         Returns:
-            (mean_residual, variance) – shape (3,) każdy
-            Jeśli return_variance=False, variance=None
+            (mean, variance|None) – shape (3,)
         """
         if not self.enabled or not self.trained:
             zeros = np.zeros(N_GP_OUTPUTS)
-            return (zeros, zeros if return_variance else None)
+            return zeros, (zeros if return_variance else None)
 
-        # Feature: [vx, vy, r, d, delta]
-        z = np.array([x_state[3], x_state[4], x_state[5],
-                      u_input[0], u_input[1]], dtype=np.float32)
-        z_norm = self._normalize(z[np.newaxis, :])  # (1, 5)
-
+        z      = extract_features_from_state(x_state, u_input)
+        z_norm = self._normalize(z[np.newaxis, :])
         test_x = torch.tensor(z_norm, dtype=torch.float32).to(self.device)
 
-        means = []
-        variances = []
-
+        means, variances = [], []
         with torch.no_grad(), gpytorch.settings.fast_pred_var():
-            for gp_model, likelihood in zip(self._models, self._likelihoods):
-                pred = likelihood(gp_model(test_x))
-                means.append(pred.mean.cpu().numpy()[0])
-                variances.append(pred.variance.cpu().numpy()[0])
+            for gp, lik in zip(self._models, self._likelihoods):
+                pred = lik(gp(test_x))
+                means.append(pred.mean.cpu().item())
+                variances.append(pred.variance.cpu().item())
 
-        mean_arr = np.array(means)      # (3,)
-        var_arr  = np.array(variances)  # (3,)
-
-        return (mean_arr, var_arr if return_variance else None)
+        m = np.array(means,     dtype=np.float64)
+        v = np.array(variances, dtype=np.float64)
+        return m, (v if return_variance else None)
 
     def predict_residual_batch(
         self,
@@ -415,34 +417,29 @@ class GPResidualModel:
         Batchowa predykcja resztek dla całego horyzontu MPC.
 
         Args:
-            X_states: (N, 6) – stany horyzontu
-            U_inputs: (N, 2) – sterowania horyzontu
+            X_states: (N, 6) stany horyzontu
+            U_inputs: (N, 2) sterowania horyzontu
 
         Returns:
-            residuals: (N, 3) – resztki [vx, vy, r]
+            residuals: (N, 3) resztki [vx, vy, r]
         """
         if not self.enabled or not self.trained:
             return np.zeros((X_states.shape[0], N_GP_OUTPUTS))
 
         N = X_states.shape[0]
-        # Features: [vx, vy, r, d, delta]
-        Z = np.column_stack([
-            X_states[:, 3], X_states[:, 4], X_states[:, 5],
-            U_inputs[:, 0], U_inputs[:, 1]
-        ]).astype(np.float32)
-
-        Z_norm = self._normalize(Z)  # (N, 5)
+        Z = np.vstack([
+            extract_features_from_state(X_states[k], U_inputs[k])
+            for k in range(N)
+        ])                               # (N, 5)
+        Z_norm = self._normalize(Z)
         test_x = torch.tensor(Z_norm, dtype=torch.float32).to(self.device)
 
-        residuals = np.zeros((N, N_GP_OUTPUTS))
-
+        out = np.zeros((N, N_GP_OUTPUTS))
         with torch.no_grad(), gpytorch.settings.fast_pred_var():
-            for i, (gp_model, likelihood) in enumerate(
-                    zip(self._models, self._likelihoods)):
-                pred = likelihood(gp_model(test_x))
-                residuals[:, i] = pred.mean.cpu().numpy()
-
-        return residuals
+            for i, (gp, lik) in enumerate(zip(self._models, self._likelihoods)):
+                pred       = lik(gp(test_x))
+                out[:, i]  = pred.mean.cpu().numpy()
+        return out
 
     # ── Korekta stanu ─────────────────────────────────────────────────────
 
@@ -453,337 +450,164 @@ class GPResidualModel:
         u_input:        np.ndarray,
     ) -> np.ndarray:
         """
-        Koryguje przewidziany następny stan o resztkę GP.
+        Koryguje przewidywany następny stan o resztkę GP.
 
-        Implementuje: x_{t+1} = f(x_t, u_t) + B_d · g(x_t, u_t)
-        gdzie B_d wybiera składowe [vx, vy, r].
-
-        Args:
-            x_nominal_next: następny stan z modelu nominalnego (6,)
-            x_current:      bieżący stan pojazdu (6,)
-            u_input:        sterowanie (2,)
-
-        Returns:
-            x_corrected: (6,) – stan z korekcją GP
+        x_{t+1} = f(x_t, u_t) + B_d · g(x_t, u_t)
+        Bd wybiera składowe [vx, vy, r].
         """
         if not self.enabled or not self.trained:
             return x_nominal_next
-
-        residual, _ = self.predict_residual(x_current, u_input,
-                                             return_variance=False)
-
-        x_corrected = x_nominal_next.copy()
-        x_corrected[GP_OUTPUT_IDX] += residual
-        return x_corrected
+        residual, _ = self.predict_residual(x_current, u_input)
+        x_corr = x_nominal_next.copy()
+        x_corr[GP_OUTPUT_IDX] += residual
+        return x_corr
 
     # ── Zapis / wczytanie ─────────────────────────────────────────────────
 
     def save(self, path: str) -> None:
-        """
-        Zapisuje wytrenowany model GP do pliku .pt.
-
-        Args:
-            path: ścieżka docelowa (np. 'gp_model.pt')
-        """
+        """Zapisuje model GP do pliku .pt."""
         if not self.trained:
-            print("[GP] UWAGA: model nie jest wytrenowany – pominięto zapis.")
+            print("[GP] Model niewytrend. – pomijam zapis.")
             return
-
-        state_dicts = [m.state_dict() for m in self._models]
-        lik_dicts   = [l.state_dict() for l in self._likelihoods]
-
-        # Potrzebujemy danych treningowych do odtworzenia ExactGP
-        train_xs = [m.train_inputs[0].cpu()  for m in self._models]
-        train_ys = [m.train_targets.cpu()    for m in self._models]
 
         torch.save({
-            'state_dicts':    state_dicts,
-            'lik_dicts':      lik_dicts,
-            'train_xs':       train_xs,
-            'train_ys':       train_ys,
-            'feat_mean':      self._feat_mean,
-            'feat_std':       self._feat_std,
-            'enabled':        self.enabled,
-            'max_data':       self.max_data,
-            'n_train_iter':   self.n_train_iter,
+            'state_dicts':  [m.state_dict()  for m in self._models],
+            'lik_dicts':    [l.state_dict()  for l in self._likelihoods],
+            'train_xs':     [m.train_inputs[0].cpu() for m in self._models],
+            'train_ys':     [m.train_targets.cpu()   for m in self._models],
+            'feat_mean':    self._feat_mean,
+            'feat_std':     self._feat_std,
+            'enabled':      self.enabled,
+            'max_data':     self.max_data,
+            'n_train_iter': self.n_train_iter,
         }, path)
-        print(f"[GP] Model zapisany: {path}")
+        print(f"[GP] Zapisano: {path}")
 
     def load(self, path: str) -> None:
-        """
-        Wczytuje wcześniej zapisany model GP.
-
-        Args:
-            path: ścieżka do pliku .pt
-        """
+        """Wczytuje model GP z pliku .pt."""
         if not os.path.exists(path):
-            print(f"[GP] UWAGA: plik modelu nie istnieje: {path}")
+            print(f"[GP] Brak pliku: {path}")
             return
+        ckpt = torch.load(path, map_location=self.device, weights_only=False)
 
-        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        self._feat_mean   = ckpt['feat_mean']
+        self._feat_std    = ckpt['feat_std']
+        self.enabled      = ckpt.get('enabled', True)
+        self.max_data     = ckpt.get('max_data', self.max_data)
 
-        self._feat_mean  = checkpoint['feat_mean']
-        self._feat_std   = checkpoint['feat_std']
-        self.enabled     = checkpoint.get('enabled', True)
-        self.max_data    = checkpoint.get('max_data', self.max_data)
-
-        self._models      = []
-        self._likelihoods = []
-
-        for train_x, train_y, sd, ld in zip(
-                checkpoint['train_xs'],
-                checkpoint['train_ys'],
-                checkpoint['state_dicts'],
-                checkpoint['lik_dicts']):
-
-            train_x = train_x.to(self.device)
-            train_y = train_y.to(self.device)
-
-            likelihood = GaussianLikelihood().to(self.device)
-            gp_model   = _SingleOutputGP(train_x, train_y, likelihood).to(self.device)
-
-            gp_model.load_state_dict(sd)
-            likelihood.load_state_dict(ld)
-
-            gp_model.eval()
-            likelihood.eval()
-
-            self._models.append(gp_model)
-            self._likelihoods.append(likelihood)
+        self._models, self._likelihoods = [], []
+        for tx, ty, sd, ld in zip(ckpt['train_xs'], ckpt['train_ys'],
+                                   ckpt['state_dicts'], ckpt['lik_dicts']):
+            tx = tx.to(self.device)
+            ty = ty.to(self.device)
+            lik = GaussianLikelihood().to(self.device)
+            gp  = _SingleOutputGP(tx, ty, lik).to(self.device)
+            gp.load_state_dict(sd); lik.load_state_dict(ld)
+            gp.eval(); lik.eval()
+            self._models.append(gp)
+            self._likelihoods.append(lik)
 
         self.trained = True
-        print(f"[GP] Model wczytany z: {path}")
-        print(f"[GP]   Punktów treningowych: {self._models[0].train_inputs[0].shape[0]}")
+        n = self._models[0].train_inputs[0].shape[0]
+        print(f"[GP] Wczytano z: {path}  ({n} punktów treningowych)")
 
-    # ── Statystyki i diagnostyka ──────────────────────────────────────────
+    # ── Diagnostyka ───────────────────────────────────────────────────────
 
     def get_info(self) -> dict:
-        """Zwraca słownik z informacjami o modelu GP."""
-        info = {
-            'enabled': self.enabled,
-            'trained': self.trained,
-            'max_data': self.max_data,
-            'device': str(self.device),
-            'n_outputs': len(self._models),
-        }
+        info = {'enabled': self.enabled, 'trained': self.trained,
+                'max_data': self.max_data, 'device': str(self.device)}
         if self.trained:
             info['n_train_points'] = self._models[0].train_inputs[0].shape[0]
             info['output_states']  = ['vx', 'vy', 'r']
-            info['feature_names']  = ['vx', 'vy', 'r', 'd', 'delta']
-            ls_all = []
-            for m in self._models:
-                ls = m.covar_module.base_kernel.lengthscale.detach().cpu().numpy().flatten()
-                ls_all.append(ls.tolist())
-            info['lengthscales'] = ls_all  # (3, 5)
+            info['feature_names']  = ['vx', 'vy', 'r', 'delta', 'vx_target']
+            info['lengthscales']   = [
+                m.covar_module.base_kernel.lengthscale
+                 .detach().cpu().numpy().flatten().tolist()
+                for m in self._models
+            ]
+            info['noise'] = [l.noise.item() for l in self._likelihoods]
         return info
 
     def print_info(self) -> None:
-        """Wypisuje informacje diagnostyczne."""
         info = self.get_info()
         print("\n[GP] ══ Informacje o modelu GP ══")
-        print(f"  Aktywny:   {info['enabled']}")
+        print(f"  Aktywny:     {info['enabled']}")
         print(f"  Wytrenowany: {info['trained']}")
         if info['trained']:
-            print(f"  Punkty treningowe: {info['n_train_points']}")
-            print(f"  Wyjście GP:  {info['output_states']}")
-            print(f"  Cechy (in):  {info['feature_names']}")
-            feat_l = info['feature_names']
-            out_l  = info['output_states']
-            for i, (out_name, ls) in enumerate(zip(out_l, info['lengthscales'])):
-                ls_str = ", ".join(f"{feat_l[j]}:{ls[j]:.3f}" for j in range(len(ls)))
-                print(f"  Lengthscales GP_{out_name}: ({ls_str})")
+            print(f"  Próbki treningowe: {info['n_train_points']}")
+            print(f"  Wyjście: {info['output_states']}")
+            print(f"  Cechy:   {info['feature_names']}")
+            fl = info['feature_names']
+            for name, ls, noise in zip(info['output_states'],
+                                        info['lengthscales'],
+                                        info['noise']):
+                ls_str = ", ".join(f"{fl[j]}:{ls[j]:.3f}"
+                                   for j in range(len(ls)))
+                print(f"  GP_{name}: ls=({ls_str}), noise={noise:.5f}")
         print()
-
-    # ── Skrótowe __call__ ─────────────────────────────────────────────────
 
     def __call__(self, x_state: np.ndarray,
                  u_input: np.ndarray) -> np.ndarray:
-        """
-        Skrót: zwraca przewidywaną resztkę [vx, vy, r] dla podanego (x, u).
-
-        Returns:
-            residual (3,) lub zeros jeśli GP wyłączony/nietrędowany
-        """
         residual, _ = self.predict_residual(x_state, u_input)
         return residual
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Pomocnicza funkcja treningu (wygodne API)
-# ══════════════════════════════════════════════════════════════════════════════
-
-def train_gp_from_folder(
-    folder: str,
-    track,
-    vehicle_model,
-    dt:            float = 0.02,
-    max_data:      int   = 500,
-    n_train_iter:  int   = 100,
-    save_path:     Optional[str] = None,
-    device:        str   = 'cpu',
-    verbose:       bool  = True,
-) -> GPResidualModel:
-    """
-    Trenuje GPResidualModel na wszystkich plikach .npz z podanego folderu.
-
-    Args:
-        folder:       ścieżka do folderu z plikami .npz
-        track:        TrackCenterline (do obliczania kappa)
-        vehicle_model: DynamicBicycleModel (model nominalny)
-        dt:           krok czasowy [s]
-        max_data:     maks. punktów treningowych (subsample)
-        n_train_iter: liczba iteracji optymalizacji
-        save_path:    jeśli podana, zapisuje model do pliku
-        device:       'cpu' lub 'cuda'
-        verbose:      wypisuj postęp
-
-    Returns:
-        Wytrenowany GPResidualModel
-    """
-    folder_path = Path(folder)
-    npz_files   = sorted(folder_path.glob("*.npz"))
-
-    if len(npz_files) == 0:
-        raise FileNotFoundError(f"Brak plików .npz w folderze: {folder}")
-
-    print(f"[GP] Znaleziono {len(npz_files)} plików .npz w '{folder}'")
-
-    gp = GPResidualModel(
-        enabled=True,
-        max_data=max_data,
-        n_train_iter=n_train_iter,
-        device=device,
-    )
-    gp.train_from_npz(npz_files, track, vehicle_model, dt=dt, verbose=verbose)
-
-    if save_path is not None:
-        gp.save(save_path)
-
-    return gp
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  Walidacja (opcjonalna)
+#  Walidacja i diagnostyka
 # ══════════════════════════════════════════════════════════════════════════════
 
 def evaluate_gp(
-    gp: GPResidualModel,
-    npz_paths: List[Path],
-    track,
+    gp:           GPResidualModel,
+    npz_paths:    List[Path],
     vehicle_model,
-    dt: float = 0.02,
-    verbose: bool = True,
+    dt:           float = 0.02,
+    verbose:      bool  = True,
 ) -> dict:
     """
-    Ocenia jakość modelu GP na zbiorze walidacyjnym.
-
-    Oblicza RMSE resztki dla każdego wyjścia GP.
+    Ocenia model GP na zbiorze walidacyjnym.
 
     Returns:
-        dict z RMSE dla ['vx', 'vy', 'r']
+        dict z RMSE i bias dla ['vx', 'vy', 'r']
     """
-    all_feat = []
-    all_targ = []
-
+    all_X, all_Y = [], []
     for path in npz_paths:
-        feat, targ = load_npz_residuals(path, vehicle_model, track, dt)
-        if feat.shape[0] > 0:
-            all_feat.append(feat)
-            all_targ.append(targ)
-
-    if len(all_feat) == 0:
+        X_i, Y_i = load_npz_residuals(path, vehicle_model, dt)
+        if X_i.shape[0] > 0:
+            all_X.append(X_i); all_Y.append(Y_i)
+    if not all_X:
         return {}
 
-    X = np.vstack(all_feat)
-    Y = np.vstack(all_targ)
+    X = np.vstack(all_X)
+    Y = np.vstack(all_Y)
 
-    # Predykcja batchowa
-    U_dummy = X[:, 3:5]  # d, delta are last two features
-    X_state_dummy = np.column_stack([
-        np.zeros((len(X), 3)),   # s, n, mu (nie używane przez GP)
-        X[:, 0], X[:, 1], X[:, 2]  # vx, vy, r
-    ])
+    # Zbuduj macierz stanów i sterowań dla batch predykcji
+    # X = [vx, vy, r, delta, vx_target] → odtwórz x_state i u_input
+    # x_state: vx=X[:,0], vy=X[:,1], r=X[:,2], pozostałe=0
+    # u_input: d = vx_target/VX_SCALE = X[:,4]/VX_SCALE, delta=X[:,3]
+    N = len(X)
+    X_state = np.zeros((N, 6))
+    X_state[:, 3] = X[:, 0]  # vx
+    X_state[:, 4] = X[:, 1]  # vy
+    X_state[:, 5] = X[:, 2]  # r
 
-    pred = gp.predict_residual_batch(X_state_dummy, U_dummy)
+    U_input = np.zeros((N, 2))
+    U_input[:, 0] = np.clip(X[:, 4] / VX_SCALE, 0, 1)  # d = vx_tgt/VX_SCALE
+    U_input[:, 1] = X[:, 3]                              # delta
 
-    rmse = {}
-    output_names = ['vx', 'vy', 'r']
-    for i, name in enumerate(output_names):
-        err  = Y[:, i] - pred[:, i]
-        rmse[name] = float(np.sqrt(np.mean(err**2)))
+    pred = gp.predict_residual_batch(X_state, U_input)
 
+    result = {}
+    names  = ['vx', 'vy', 'r']
     if verbose:
-        print("[GP] Walidacja RMSE resztek:")
-        for name, val in rmse.items():
-            print(f"  residual_{name}: RMSE = {val:.6f} m/s")
-
-    return rmse
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  Demonstracja (uruchom: python gaussian.py)
-# ══════════════════════════════════════════════════════════════════════════════
-
-if __name__ == '__main__':
-    import sys
-    sys.path.insert(0, str(Path(__file__).parent))
-    from vehicle_params import VehicleParams
-    from vehicle_model import DynamicBicycleModel
-    from track import TrackCenterline
-
-    print("=" * 60)
-    print(" Demonstracja GP Residual Model dla F1/10")
-    print("=" * 60)
-
-    # Parametry
-    DATA_FOLDER = "f1enth_long_track_sens"   # folder z plikami .npz
-    SAVE_PATH   = "gp_model.pt"
-    MAX_DATA    = 500
-    N_ITER      = 80
-    DT          = 0.02
-
-    # Przygotuj tor i model (do obliczania resztek)
-    track = TrackCenterline.make_technical(base_r=6.0, track_width=1.5)
-    params = VehicleParams()
-    vehicle_model = DynamicBicycleModel(params)
-
-    folder_path = Path(DATA_FOLDER)
-    if not folder_path.exists():
-        # Fallback: użyj lokalnych plików .npz jeśli folder nie istnieje
-        local_npz = sorted(Path(".").glob("*.npz"))
-        if len(local_npz) == 0:
-            print(f"[DEMO] Folder '{DATA_FOLDER}' nie istnieje i brak lokalnych .npz")
-            print("[DEMO] Uruchom z właściwą ścieżką do danych.")
-            sys.exit(0)
-        npz_files = local_npz
-        print(f"[DEMO] Używam lokalnych plików: {[f.name for f in npz_files]}")
-    else:
-        npz_files = sorted(folder_path.glob("*.npz"))
-        print(f"[DEMO] Pliki w '{DATA_FOLDER}': {[f.name for f in npz_files]}")
-
-    # Trening
-    gp = GPResidualModel(enabled=True, max_data=MAX_DATA, n_train_iter=N_ITER)
-    gp.train_from_npz(npz_files, track, vehicle_model, dt=DT, verbose=True)
-
-    gp.print_info()
-
-    # Test predykcji
-    x_test = np.array([10.0, 0.05, 0.1, 3.0, 0.2, 0.5])  # stan testowy
-    u_test = np.array([0.3, 0.15])                          # sterowanie testowe
-
-    resid, var = gp.predict_residual(x_test, u_test, return_variance=True)
-    print(f"[DEMO] Test predykcji:")
-    print(f"  x = {x_test}, u = {u_test}")
-    print(f"  residual [vx, vy, r] = {resid}")
-    print(f"  variance [vx, vy, r] = {var}")
-
-    # Zapis
-    gp.save(SAVE_PATH)
-
-    # Test wczytania
-    gp2 = GPResidualModel()
-    gp2.load(SAVE_PATH)
-    resid2, _ = gp2.predict_residual(x_test, u_test)
-    print(f"\n[DEMO] Po wczytaniu: residual = {resid2}")
-    print(f"[DEMO] Różnica: {np.abs(resid - resid2).max():.2e}")
-    print("\n[DEMO] Zakończono pomyślnie.")
+        print("[GP] Walidacja (RMSE resztek):")
+    for i, n in enumerate(names):
+        err  = Y[:, i] - pred[:, i]
+        rmse = float(np.sqrt(np.mean(err**2)))
+        bias = float(err.mean())
+        result[n] = {'rmse': rmse, 'bias': bias}
+        if verbose:
+            baseline_rmse = float(np.sqrt(np.mean(Y[:, i]**2)))
+            print(f"  resid_{n}: RMSE={rmse:.5f}  bias={bias:.5f}  "
+                  f"baseline(0-pred)={baseline_rmse:.5f}  "
+                  f"R²={1-rmse**2/baseline_rmse**2:.3f}")
+    return result

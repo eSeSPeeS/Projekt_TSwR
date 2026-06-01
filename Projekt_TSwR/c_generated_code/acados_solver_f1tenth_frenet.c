@@ -154,8 +154,8 @@ void f1tenth_frenet_acados_create_set_plan(ocp_nlp_plan_t* nlp_solver_plan, cons
 
     nlp_solver_plan->nlp_solver = SQP_RTI;
 
-    nlp_solver_plan->ocp_qp_solver_plan.qp_solver = PARTIAL_CONDENSING_HPIPM;
-    nlp_solver_plan->relaxed_ocp_qp_solver_plan.qp_solver = PARTIAL_CONDENSING_HPIPM;
+    nlp_solver_plan->ocp_qp_solver_plan.qp_solver = FULL_CONDENSING_HPIPM;
+    nlp_solver_plan->relaxed_ocp_qp_solver_plan.qp_solver = FULL_CONDENSING_HPIPM;
     nlp_solver_plan->nlp_cost[0] = NONLINEAR_LS;
     for (int i = 1; i < N; i++)
         nlp_solver_plan->nlp_cost[i] = NONLINEAR_LS;
@@ -474,67 +474,7 @@ void f1tenth_frenet_acados_setup_nlp_in(f1tenth_frenet_solver_capsule* capsule, 
         cost_scaling[27] = 0.02;
         cost_scaling[28] = 0.02;
         cost_scaling[29] = 0.02;
-        cost_scaling[30] = 0.02;
-        cost_scaling[31] = 0.02;
-        cost_scaling[32] = 0.02;
-        cost_scaling[33] = 0.02;
-        cost_scaling[34] = 0.02;
-        cost_scaling[35] = 0.02;
-        cost_scaling[36] = 0.02;
-        cost_scaling[37] = 0.02;
-        cost_scaling[38] = 0.02;
-        cost_scaling[39] = 0.02;
-        cost_scaling[40] = 0.02;
-        cost_scaling[41] = 0.02;
-        cost_scaling[42] = 0.02;
-        cost_scaling[43] = 0.02;
-        cost_scaling[44] = 0.02;
-        cost_scaling[45] = 0.02;
-        cost_scaling[46] = 0.02;
-        cost_scaling[47] = 0.02;
-        cost_scaling[48] = 0.02;
-        cost_scaling[49] = 0.02;
-        cost_scaling[50] = 0.02;
-        cost_scaling[51] = 0.02;
-        cost_scaling[52] = 0.02;
-        cost_scaling[53] = 0.02;
-        cost_scaling[54] = 0.02;
-        cost_scaling[55] = 0.02;
-        cost_scaling[56] = 0.02;
-        cost_scaling[57] = 0.02;
-        cost_scaling[58] = 0.02;
-        cost_scaling[59] = 0.02;
-        cost_scaling[60] = 0.02;
-        cost_scaling[61] = 0.02;
-        cost_scaling[62] = 0.02;
-        cost_scaling[63] = 0.02;
-        cost_scaling[64] = 0.02;
-        cost_scaling[65] = 0.02;
-        cost_scaling[66] = 0.02;
-        cost_scaling[67] = 0.02;
-        cost_scaling[68] = 0.02;
-        cost_scaling[69] = 0.02;
-        cost_scaling[70] = 0.02;
-        cost_scaling[71] = 0.02;
-        cost_scaling[72] = 0.02;
-        cost_scaling[73] = 0.02;
-        cost_scaling[74] = 0.02;
-        cost_scaling[75] = 0.02;
-        cost_scaling[76] = 0.02;
-        cost_scaling[77] = 0.02;
-        cost_scaling[78] = 0.02;
-        cost_scaling[79] = 0.02;
-        cost_scaling[80] = 0.02;
-        cost_scaling[81] = 0.02;
-        cost_scaling[82] = 0.02;
-        cost_scaling[83] = 0.02;
-        cost_scaling[84] = 0.02;
-        cost_scaling[85] = 0.02;
-        cost_scaling[86] = 0.02;
-        cost_scaling[87] = 0.02;
-        cost_scaling[88] = 0.02;
-        cost_scaling[89] = 0.02;
-        cost_scaling[90] = 1;
+        cost_scaling[30] = 1;
         for (int i = 0; i <= N; i++)
         {
             ocp_nlp_cost_model_set(nlp_config, nlp_dims, nlp_in, i, "scaling", &cost_scaling[i]);
@@ -562,9 +502,8 @@ void f1tenth_frenet_acados_setup_nlp_in(f1tenth_frenet_solver_capsule* capsule, 
 
    double* W_0 = calloc(NY0*NY0, sizeof(double));
     // change only the non-zero elements:
-    W_0[0+(NY0) * 0] = 10;
-    W_0[1+(NY0) * 1] = 10;
-    W_0[2+(NY0) * 2] = 2;
+    W_0[0+(NY0) * 0] = 1;
+    W_0[1+(NY0) * 1] = 1;
     W_0[3+(NY0) * 3] = 0.1;
     W_0[4+(NY0) * 4] = 0.5;
     ocp_nlp_cost_model_set(nlp_config, nlp_dims, nlp_in, 0, "W", W_0);
@@ -579,9 +518,8 @@ void f1tenth_frenet_acados_setup_nlp_in(f1tenth_frenet_solver_capsule* capsule, 
     free(yref);
     double* W = calloc(NY*NY, sizeof(double));
     // change only the non-zero elements:
-    W[0+(NY) * 0] = 10;
-    W[1+(NY) * 1] = 10;
-    W[2+(NY) * 2] = 2;
+    W[0+(NY) * 0] = 1;
+    W[1+(NY) * 1] = 1;
     W[3+(NY) * 3] = 0.1;
     W[4+(NY) * 4] = 0.5;
 
@@ -597,9 +535,8 @@ void f1tenth_frenet_acados_setup_nlp_in(f1tenth_frenet_solver_capsule* capsule, 
 
     double* W_e = calloc(NYN*NYN, sizeof(double));
     // change only the non-zero elements:
-    W_e[0+(NYN) * 0] = 30;
-    W_e[1+(NYN) * 1] = 30;
-    W_e[2+(NYN) * 2] = 2;
+    W_e[0+(NYN) * 0] = 3;
+    W_e[1+(NYN) * 1] = 3;
     ocp_nlp_cost_model_set(nlp_config, nlp_dims, nlp_in, N, "W", W_e);
     free(W_e);
     ocp_nlp_cost_model_set_external_param_fun(nlp_config, nlp_dims, nlp_in, 0, "nls_y_fun", &capsule->cost_y_0_fun);
@@ -671,8 +608,8 @@ void f1tenth_frenet_acados_setup_nlp_in(f1tenth_frenet_solver_capsule* capsule, 
     double* lbu = lubu;
     double* ubu = lubu + NBU;
     ubu[0] = 1;
-    lbu[1] = -0.5;
-    ubu[1] = 0.5;
+    lbu[1] = -0.3;
+    ubu[1] = 0.3;
 
     for (int i = 0; i < N; i++)
     {
@@ -696,8 +633,8 @@ void f1tenth_frenet_acados_setup_nlp_in(f1tenth_frenet_solver_capsule* capsule, 
     double* lubx = calloc(2*NBX, sizeof(double));
     double* lbx = lubx;
     double* ubx = lubx + NBX;
-    lbx[0] = -1.5;
-    ubx[0] = 1.5;
+    lbx[0] = -0.7;
+    ubx[0] = 0.7;
 
     for (int i = 1; i < N; i++)
     {
@@ -777,13 +714,10 @@ static void f1tenth_frenet_acados_create_set_opts(f1tenth_frenet_solver_capsule*
     int globalization_full_step_dual = 0;
     ocp_nlp_solver_opts_set(nlp_config, capsule->nlp_opts, "globalization_full_step_dual", &globalization_full_step_dual);
 
-    double levenberg_marquardt = 0;
+    double levenberg_marquardt = 0.001;
     ocp_nlp_solver_opts_set(nlp_config, nlp_opts, "levenberg_marquardt", &levenberg_marquardt);
 
     /* options QP solver */
-    int qp_solver_cond_N;const int qp_solver_cond_N_ori = 90;
-    qp_solver_cond_N = N < qp_solver_cond_N_ori ? N : qp_solver_cond_N_ori; // use the minimum value here
-    ocp_nlp_solver_opts_set(nlp_config, nlp_opts, "qp_cond_N", &qp_solver_cond_N);
 
     int nlp_solver_ext_qp_res = 0;
     ocp_nlp_solver_opts_set(nlp_config, nlp_opts, "ext_qp_res", &nlp_solver_ext_qp_res);
@@ -819,19 +753,15 @@ static void f1tenth_frenet_acados_create_set_opts(f1tenth_frenet_solver_capsule*
     double anderson_activation_threshold = 10;
     ocp_nlp_solver_opts_set(nlp_config, nlp_opts, "anderson_activation_threshold", &anderson_activation_threshold);
 
-    int qp_solver_iter_max = 50;
+    int qp_solver_iter_max = 100;
     ocp_nlp_solver_opts_set(nlp_config, nlp_opts, "qp_iter_max", &qp_solver_iter_max);
 
 
+    int qp_solver_warm_start = 1;
+    ocp_nlp_solver_opts_set(nlp_config, nlp_opts, "qp_warm_start", &qp_solver_warm_start);
 
     int print_level = 0;
     ocp_nlp_solver_opts_set(nlp_config, nlp_opts, "print_level", &print_level);
-    int qp_solver_cond_ric_alg = 1;
-    ocp_nlp_solver_opts_set(nlp_config, nlp_opts, "qp_cond_ric_alg", &qp_solver_cond_ric_alg);
-
-    int qp_solver_ric_alg = 1;
-    ocp_nlp_solver_opts_set(nlp_config, nlp_opts, "qp_ric_alg", &qp_solver_ric_alg);
-
 
     int ext_cost_num_hess = 0;
 }
@@ -940,22 +870,8 @@ int f1tenth_frenet_acados_create_with_discretization(f1tenth_frenet_solver_capsu
  */
 int f1tenth_frenet_acados_update_qp_solver_cond_N(f1tenth_frenet_solver_capsule* capsule, int qp_solver_cond_N)
 {
-    // 1) destroy solver
-    ocp_nlp_solver_destroy(capsule->nlp_solver);
-
-    // 2) set new value for "qp_cond_N"
-    const int N = capsule->nlp_solver_plan->N;
-    if(qp_solver_cond_N > N)
-        printf("Warning: qp_solver_cond_N = %d > N = %d\n", qp_solver_cond_N, N);
-    ocp_nlp_solver_opts_set(capsule->nlp_config, capsule->nlp_opts, "qp_cond_N", &qp_solver_cond_N);
-
-    // 3) continue with the remaining steps from f1tenth_frenet_acados_create_with_discretization(...):
-    // -> 8) create solver
-    capsule->nlp_solver = ocp_nlp_solver_create(capsule->nlp_config, capsule->nlp_dims, capsule->nlp_opts, capsule->nlp_in);
-
-    // -> 9) do precomputations
-    int status = f1tenth_frenet_acados_create_precompute(capsule);
-    return status;
+    printf("\nacados_update_qp_solver_cond_N() not implemented, since no partial condensing solver is used!\n\n");
+    exit(1);
 }
 
 
@@ -985,14 +901,6 @@ int f1tenth_frenet_acados_reset(f1tenth_frenet_solver_capsule* capsule, int rese
         {
             ocp_nlp_out_set(nlp_config, nlp_dims, nlp_out, nlp_in, i, "pi", buffer);
         }
-    }
-    // get qp_status: if NaN -> reset memory
-    int qp_status;
-    ocp_nlp_get(capsule->nlp_solver, "qp_status", &qp_status);
-    if (reset_qp_solver_mem || (qp_status == 3))
-    {
-        // printf("\nin reset qp_status %d -> resetting QP memory\n", qp_status);
-        ocp_nlp_solver_reset_qp_memory(nlp_solver, nlp_in, nlp_out);
     }
 
     free(buffer);

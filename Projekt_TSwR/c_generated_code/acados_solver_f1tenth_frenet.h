@@ -64,7 +64,7 @@
 #define F1TENTH_FRENET_NY0    5
 #define F1TENTH_FRENET_NY     5
 #define F1TENTH_FRENET_NYN    3
-#define F1TENTH_FRENET_N      90
+#define F1TENTH_FRENET_N      30
 #define F1TENTH_FRENET_NH     0
 #define F1TENTH_FRENET_NHN    0
 #define F1TENTH_FRENET_NH0    0

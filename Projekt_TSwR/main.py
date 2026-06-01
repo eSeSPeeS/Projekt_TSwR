@@ -28,10 +28,10 @@ from controllers import (
 KONTROLER   = 'mpc'          # 'p' | 'pid' | 'random' | 'mpc'
 WIZUALIZACJA = 'wykresy'     # 'wykresy' | 'pybullet' | 'oba'
 
-N_STEPS = 500
+N_STEPS = 5000
 DT      = 0.02
-VX0     = 0.5
-TOR     = 'technical'        # 'oval' | 'figure8' | 'road' | 'technical' | 'technical_sharp'
+VX0     = 2.5
+TOR     = 'road'        # 'oval' | 'figure8' | 'road' | 'technical' | 'technical_sharp'
 
 REALTIME_MATPLOTLIB      = True
 REALTIME_INTERVAL_STEPS  = 3
@@ -42,7 +42,7 @@ LOG_EVERY = 10               # co który krok wypisywać log
 # ── Konfiguracja GP ───────────────────────────────────────────────────────────
 # GP_ENABLED = True  → Gaussowski model resztkowy aktywny
 # GP_ENABLED = False → klasyczny MPC (bez GP, szybciej)
-GP_ENABLED       = 0
+GP_ENABLED       = True
 
 # Folder z plikami .npz do treningu GP.
 # Ustaw na właściwy katalog na swoim komputerze.
@@ -57,8 +57,8 @@ GP_NPZ_FILES     = None   # np. ["plik1.npz", "plik2.npz"]
 # Jeśli plik istnieje, GP zostanie wczytany zamiast trenować od nowa.
 GP_SAVE_PATH     = "gp_model.pt"
 
-GP_MAX_DATA      = 2500    # maks. punktów treningowych (subsample)
-GP_N_TRAIN_ITER  = 180     # iteracje optymalizacji hiperparametrów
+GP_MAX_DATA      = 5500    # maks. punktów treningowych (subsample)
+GP_N_TRAIN_ITER  = 380     # iteracje optymalizacji hiperparametrów
 GP_DEVICE        = 'cpu'  # 'cpu' lub 'cuda'
 
 
@@ -114,7 +114,7 @@ def _build_gp(track, vehicle_model):
         return gp
 
     print(f"[GP] Trening na {len(npz_paths)} pliku/plikach...")
-    gp.train_from_npz(npz_paths, track, vehicle_model, dt=DT, verbose=True)
+    gp.train_from_npz(npz_paths, vehicle_model, dt=DT, verbose=True)
     gp.print_info()
 
     # Zapisz wytrenowany model
@@ -177,27 +177,27 @@ def main():
         ctrl = MPCController(
             model=sim.model,
             track=track,
-            N=90,          # Horyzont predykcji — MPC "patrzy" 18 kroków do przodu
+            N=30,          # Horyzont predykcji — MPC "patrzy" 18 kroków do przodu
                     # (18 × 0.02s = 0.36s). Więcej = lepsze planowanie zakrętów,
                     # ale wolniejsze obliczenia.
 
             dt=DT,         # Krok czasowy [s] — musi być taki sam jak w symulatorze.
 
-            vx_ref=5.5,    # Prędkość docelowa [m/s]. Przy q_vx=0.0 jest ignorowana
+            vx_ref=3.5,    # Prędkość docelowa [m/s]. Przy q_vx=0.0 jest ignorowana
                         # (patrz niżej) — możesz tu wpisać cokolwiek.
 
             # ── Wagi funkcji kosztu ───────────────────────────────────────────────
             # Im większa waga, tym mocniej MPC "karze" odchylenie od zera.
 
-            q_n=10.0,       # Kara za odchylenie boczne n [m] od centerline.
+            q_n=1.0,       # Kara za odchylenie boczne n [m] od centerline.
                         # Główna waga "trzymania toru". Zwiększ jeśli pojazd
                         # za bardzo dryfuje od środka.
 
-            q_mu=10.0,      # Kara za kąt pojazdu względem toru μ [rad].
+            q_mu=1.0,      # Kara za kąt pojazdu względem toru μ [rad].
                         # Tłumi oscylacje kątowe — pojazd jedzie "prosto"
                         # względem osi toru, nie bokiem.
 
-            q_vx=2.0,      # Kara za błąd prędkości (vx - vx_ref)². Aktualnie
+            q_vx=0.0,      # Kara za błąd prędkości (vx - vx_ref)². Aktualnie
                         # wyłączona (=0). Pojazd nie stara się utrzymać vx_ref,
                         # prędkość zależy tylko od r_d.
 
