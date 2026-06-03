@@ -98,8 +98,10 @@ typedef struct f1tenth_frenet_solver_capsule
 
     // dynamics
 
-    external_function_external_param_casadi *discr_dyn_phi_fun;
-    external_function_external_param_casadi *discr_dyn_phi_fun_jac_ut_xt;
+    external_function_external_param_casadi *expl_vde_forw;
+    external_function_external_param_casadi *expl_vde_forw_p;
+    external_function_external_param_casadi *expl_ode_fun;
+    external_function_external_param_casadi *expl_vde_adj;
 
 
 

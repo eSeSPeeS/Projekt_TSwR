@@ -29,6 +29,215 @@ except ImportError:
     print("[INFO] PyBullet niedostępny – tylko matplotlib.")
 
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LOGGER SYMULACJI
+# ══════════════════════════════════════════════════════════════════════════════
+
+import csv, json, datetime
+
+class SimulationLogger:
+    """
+    Zapisuje dane symulacji do pliku CSV i opcjonalnie JSON.
+
+    Dla każdej iteracji zapisuje:
+      - czas, stany Freneta [s, n, mu, vx, vy, r]
+      - pozycja kartezjańska pojazdu i osi przedniej [X, Y, psi, Xf, Yf]
+      - sterowanie [d, delta_deg]
+      - status solvera (kod, błąd T/F, koszt)
+      - pełny wąż predykcyjny (N+1 punktów Freneta i kartezjańskich)
+
+    Użycie:
+        logger = SimulationLogger("wyniki.csv")
+        # ... w pętli po każdym kroku:
+        logger.log(t, state, u, track, ctrl)
+        # na końcu:
+        logger.close()
+        logger.save_json("wyniki.json")   # opcjonalnie
+    """
+
+    # Kolumny stałe (bez predykcji)
+    FIXED_COLS = [
+        "iter", "t_s",
+        "s_m", "n_m", "mu_rad", "vx_ms", "vy_ms", "r_rads",
+        "X_m", "Y_m", "psi_rad",
+        "Xf_m", "Yf_m",
+        "d", "delta_deg", "delta_rad",
+        "solver_status", "solver_error", "solver_cost",
+    ]
+
+    def __init__(self, csv_path: str, lf: float = 0.15875):
+        """
+        Args:
+            csv_path: ścieżka do pliku .csv
+            lf:       odległość CoG → oś przednia [m]
+        """
+        self.csv_path  = csv_path
+        self.lf        = lf
+        self._rows: list = []
+        self._N: int    = 0          # horyzont predykcji (ustalany przy pierwszym logu)
+        self._header_written = False
+        self._csvfile  = open(csv_path, 'w', newline='', encoding='utf-8')
+        self._writer   = None        # tworzony po ustaleniu N
+
+        print(f"[Logger] Otwarto: {csv_path}")
+
+    def log(self,
+            iteration:  int,
+            t:          float,
+            state:      np.ndarray,
+            u:          np.ndarray,
+            track,
+            controller=None) -> None:
+        """
+        Loguje jeden krok symulacji.
+
+        Args:
+            iteration:  numer iteracji
+            t:          czas symulacji [s]
+            state:      stan pojazdu [s, n, mu, vx, vy, r]
+            u:          sterowanie [d, delta]
+            track:      TrackCenterline (do konwersji Frenet→kart.)
+            controller: MPCController lub None (do pobrania statusu solvera
+                        i danych predykcji)
+        """
+        s, n, mu, vx, vy, r = state
+        d, delta = float(u[0]), float(u[1])
+
+        X, Y, psi_track = track.frenet_to_cartesian(s, n)
+        psi    = psi_track + mu
+        Xf     = X + self.lf * np.cos(psi)
+        Yf     = Y + self.lf * np.sin(psi)
+
+        # Status solvera
+        solver_status = -1
+        solver_error  = False
+        solver_cost   = 0.0
+        if controller is not None and hasattr(controller, 'last_solver_status'):
+            solver_status = int(controller.last_solver_status)
+            solver_error  = bool(controller.last_solver_error)
+            solver_cost   = float(controller.last_cost)
+
+        # Predykcja MPC
+        pred_states = None   # (N+1, 6) Frenet
+        pred_xy     = None   # (N+1, 2) kartezjańskie
+        N = 0
+        if controller is not None:
+            if hasattr(controller, 'prediction_states') and controller.prediction_states is not None:
+                pred_states = controller.prediction_states
+                N = len(pred_states) - 1
+            if hasattr(controller, 'prediction_xy') and controller.prediction_xy is not None:
+                pred_xy = controller.prediction_xy
+
+        # Ustal nagłówek przy pierwszym logu (N może być != 0)
+        if not self._header_written:
+            self._N = N
+            pred_cols = []
+            for k in range(N + 1):
+                for col in ['s', 'n', 'mu', 'vx', 'vy', 'r']:
+                    pred_cols.append(f"pred_{k}_{col}")
+                pred_cols.append(f"pred_{k}_X")
+                pred_cols.append(f"pred_{k}_Y")
+            header = self.FIXED_COLS + pred_cols
+            self._writer = csv.DictWriter(self._csvfile, fieldnames=header)
+            self._writer.writeheader()
+            self._header_written = True
+
+        # Buduj wiersz
+        row = {
+            "iter":          iteration,
+            "t_s":           round(t, 4),
+            "s_m":           round(float(s), 6),
+            "n_m":           round(float(n), 6),
+            "mu_rad":        round(float(mu), 6),
+            "vx_ms":         round(float(vx), 6),
+            "vy_ms":         round(float(vy), 6),
+            "r_rads":        round(float(r), 6),
+            "X_m":           round(float(X), 6),
+            "Y_m":           round(float(Y), 6),
+            "psi_rad":       round(float(psi), 6),
+            "Xf_m":          round(float(Xf), 6),
+            "Yf_m":          round(float(Yf), 6),
+            "d":             round(d, 6),
+            "delta_deg":     round(float(delta * 180 / np.pi), 4),
+            "delta_rad":     round(float(delta), 6),
+            "solver_status": solver_status,
+            "solver_error":  int(solver_error),
+            "solver_cost":   round(solver_cost, 6),
+        }
+
+        # Dane predykcji
+        for k in range(self._N + 1):
+            if pred_states is not None and k < len(pred_states):
+                ps, pn, pmu, pvx, pvy, pr = pred_states[k]
+            else:
+                ps = pn = pmu = pvx = pvy = pr = 0.0
+            if pred_xy is not None and k < len(pred_xy):
+                pX, pY = pred_xy[k]
+            else:
+                pX = pY = 0.0
+
+            row[f"pred_{k}_s"]   = round(float(ps),  6)
+            row[f"pred_{k}_n"]   = round(float(pn),  6)
+            row[f"pred_{k}_mu"]  = round(float(pmu), 6)
+            row[f"pred_{k}_vx"]  = round(float(pvx), 6)
+            row[f"pred_{k}_vy"]  = round(float(pvy), 6)
+            row[f"pred_{k}_r"]   = round(float(pr),  6)
+            row[f"pred_{k}_X"]   = round(float(pX),  6)
+            row[f"pred_{k}_Y"]   = round(float(pY),  6)
+
+        self._writer.writerow(row)
+        self._rows.append(row)
+
+    def flush(self) -> None:
+        """Wymusza zapis bufora na dysk."""
+        self._csvfile.flush()
+
+    def close(self) -> None:
+        """Zamyka plik CSV."""
+        if not self._csvfile.closed:
+            self._csvfile.flush()
+            self._csvfile.close()
+        print(f"[Logger] Zamknięto: {self.csv_path} ({len(self._rows)} wierszy)")
+
+    def save_json(self, json_path: str) -> None:
+        """
+        Zapisuje te same dane do pliku JSON (czytelny, ale większy).
+
+        Args:
+            json_path: ścieżka do pliku .json
+        """
+        meta = {
+            "created":      datetime.datetime.now().isoformat(),
+            "csv_path":     self.csv_path,
+            "n_steps":      len(self._rows),
+            "horizon_N":    self._N,
+        }
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump({"meta": meta, "data": self._rows}, f,
+                      indent=2, ensure_ascii=False)
+        print(f"[Logger] JSON zapisany: {json_path}")
+
+    def summary(self) -> dict:
+        """Zwraca podstawowe statystyki po symulacji."""
+        if not self._rows:
+            return {}
+        n_vals  = [abs(r['n_m'])         for r in self._rows]
+        vx_vals = [r['vx_ms']            for r in self._rows]
+        err_cnt = sum(r['solver_error']  for r in self._rows)
+        oob     = sum(1 for r in self._rows
+                      if abs(r['n_m']) > 0.5)   # >0.5m od centerline – heurystyczne
+        return {
+            'n_steps':       len(self._rows),
+            'solver_errors': err_cnt,
+            'out_of_bounds': oob,
+            'n_max_m':       max(n_vals),
+            'n_mean_m':      sum(n_vals) / len(n_vals),
+            'vx_mean_ms':    sum(vx_vals) / len(vx_vals),
+            'vx_max_ms':     max(vx_vals),
+        }
+
+
 class F1tenthSimulator:
     def __init__(self,
                  track: TrackCenterline,
@@ -123,8 +332,15 @@ class F1tenthSimulator:
             log_every: int = 100,
             realtime_plot: bool = False,
             realtime_interval_steps: int = 1,
-            realtime_pause: float = 0.001) -> dict:
-
+            realtime_pause: float = 0.001,
+            logger: "SimulationLogger" = None,
+            log_flush_every: int = 50) -> dict:
+        """
+        Args:
+            logger:          SimulationLogger lub None – jeśli podany, każdy krok
+                             jest zapisywany do pliku CSV.
+            log_flush_every: co ile kroków wymuszać zapis bufora na dysk.
+        """
         oob = 0
         log_every               = max(1, int(log_every))
         realtime_interval_steps = max(1, int(realtime_interval_steps))
@@ -143,18 +359,37 @@ class F1tenthSimulator:
             if info["out_of_bounds"]:
                 oob += 1
 
+            # ── Logger ────────────────────────────────────────────────────
+            if logger is not None:
+                logger.log(
+                    iteration=i,
+                    t=self.time,
+                    state=self.state,
+                    u=u,
+                    track=self.track,
+                    controller=controller,
+                )
+                if i % log_flush_every == 0:
+                    logger.flush()
+
             if verbose and i % log_every == 0:
                 s, n, mu, vx, vy, r = self.state
                 X, Y, psi_track = self.track.frenet_to_cartesian(s, n)
                 psi     = psi_track + mu
                 X_front = X + self.params.lf * np.cos(psi)
                 Y_front = Y + self.params.lf * np.sin(psi)
+                # Pokaż status solvera w logu jeśli MPC
+                solver_info = ""
+                if hasattr(controller, 'last_solver_status'):
+                    st  = controller.last_solver_status
+                    err = controller.last_solver_error
+                    solver_info = f" | solver={st}{' ERR' if err else ''}"
                 print(
                     f"iter={i:04d} | "
                     f"t={self.time:.2f}s | s={s:.2f}m | n={n:.3f}m | "
                     f"vx={vx:.2f}m/s | delta={u[1] * 180 / np.pi:.1f}° | "
                     f"Xf={X_front:.3f}m | Yf={Y_front:.3f}m | "
-                    f"psi={psi:.3f}rad"
+                    f"psi={psi:.3f}rad{solver_info}"
                 )
 
             if realtime_plot and (i % realtime_interval_steps == 0):

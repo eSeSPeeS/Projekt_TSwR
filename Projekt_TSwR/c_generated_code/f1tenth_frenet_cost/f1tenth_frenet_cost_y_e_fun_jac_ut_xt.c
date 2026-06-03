@@ -107,8 +107,8 @@ static int casadi_f0(const casadi_real** arg, casadi_real** res, casadi_int* iw,
   if (res[0]) res[0][1] = w1;
   /* #5: @1 = @0[3] */
   for (rr=(&w1), cs=w0+3; cs!=w0+4; cs+=1) *rr++ = *cs;
-  /* #6: @2 = 3.5 */
-  w2 = 3.5000000000000000e+00;
+  /* #6: @2 = 4.5 */
+  w2 = 4.5000000000000000e+00;
   /* #7: @1 = (@1-@2) */
   w1 -= w2;
   /* #8: output[0][2] = @1 */

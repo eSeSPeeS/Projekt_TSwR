@@ -37,8 +37,9 @@
 # model
 MODEL_SRC=
 
-MODEL_SRC+= f1tenth_frenet_model/f1tenth_frenet_dyn_disc_phi_fun.c
-MODEL_SRC+= f1tenth_frenet_model/f1tenth_frenet_dyn_disc_phi_fun_jac.c
+MODEL_SRC+= f1tenth_frenet_model/f1tenth_frenet_expl_ode_fun.c
+MODEL_SRC+= f1tenth_frenet_model/f1tenth_frenet_expl_vde_forw.c
+MODEL_SRC+= f1tenth_frenet_model/f1tenth_frenet_expl_vde_adj.c
 
 MODEL_OBJ := $(MODEL_SRC:.c=.o)
 # optimal control problem - mostly CasADi exports
@@ -58,6 +59,14 @@ OCP_SRC+= f1tenth_frenet_cost/f1tenth_frenet_cost_y_e_hess.c
 OCP_SRC+= acados_solver_f1tenth_frenet.c
 
 OCP_OBJ := $(OCP_SRC:.c=.o)
+# for sim solver
+SIM_SRC= acados_sim_solver_f1tenth_frenet.c
+SIM_OBJ := $(SIM_SRC:.c=.o)
+
+# for target example_sim
+EX_SIM_SRC= main_sim_f1tenth_frenet.c
+EX_SIM_OBJ := $(EX_SIM_SRC:.c=.o)
+EX_SIM_EXE := $(EX_SIM_SRC:.c=)
 # for target example
 EX_SRC= main_f1tenth_frenet.c
 EX_OBJ := $(EX_SRC:.c=.o)
@@ -67,6 +76,7 @@ EX_EXE := $(EX_SRC:.c=)
 # combine model, (potentially) sim and ocp object files
 OBJ=
 OBJ+= $(MODEL_OBJ)
+OBJ+= $(SIM_OBJ)
 OBJ+= $(OCP_OBJ)
 
 EXTERNAL_DIR=
@@ -102,17 +112,23 @@ LDLIBS+=
 # libraries
 LIBACADOS_SOLVER=libacados_solver_f1tenth_frenet.so
 LIBACADOS_OCP_SOLVER=libacados_ocp_solver_f1tenth_frenet.so
+LIBACADOS_SIM_SOLVER=lib$(SIM_SRC:.c=.so)
 
 # virtual targets
 .PHONY : all clean
-all: clean example
-shared_lib: ocp_shared_lib
+
+	all: clean example_sim example
+shared_lib: bundled_shared_lib ocp_shared_lib sim_shared_lib
 
 # some linker targets
 example: $(EX_OBJ) $(OBJ)
 	$(CC) $^ -o $(EX_EXE) $(LDFLAGS) $(LDLIBS)
 
+example_sim: $(EX_SIM_OBJ) $(MODEL_OBJ) $(SIM_OBJ)
+	$(CC) $^ -o $(EX_SIM_EXE) $(LDFLAGS) $(LDLIBS)
 
+sim_shared_lib: $(SIM_OBJ) $(MODEL_OBJ)
+	$(CC) -shared $^ -o $(LIBACADOS_SIM_SOLVER) $(LDFLAGS) $(LDLIBS)
 bundled_shared_lib: $(OBJ)
 	$(CC) -shared $^ -o $(LIBACADOS_SOLVER) $(LDFLAGS) $(LDLIBS)
 
@@ -150,12 +166,38 @@ ocp_cython: ocp_cython_o
 	$(LDFLAGS) $(LDLIBS)
 
 
+# Sim Cython targets
+sim_cython_c: sim_shared_lib
+	cython \
+	-o acados_sim_solver_pyx.c \
+	-I $(INCLUDE_PATH)/../interfaces/acados_template/acados_template \
+	$(INCLUDE_PATH)/../interfaces/acados_template/acados_template/acados_sim_solver_pyx.pyx \
+	-I /home/luk/Projekt_TSwR/Projekt_TSwR/c_generated_code \
 
+sim_cython_o: sim_cython_c
+	$(CC) $(ACADOS_FLAGS) -c -O2 \
+	-fPIC \
+	-DNPY_NO_DEPRECATED_API=NPY_1_7_API_VERSION \
+	-o acados_sim_solver_pyx.o \
+	-I $(INCLUDE_PATH)/blasfeo/include/ \
+	-I $(INCLUDE_PATH)/hpipm/include/ \
+	-I $(INCLUDE_PATH) \
+	-I /home/luk/acados/venv/lib/python3.10/site-packages/numpy/_core/include \
+	-I /usr/include/python3.10 \
+	acados_sim_solver_pyx.c \
+
+sim_cython: sim_cython_o
+	$(CC) $(ACADOS_FLAGS) -shared \
+	-o acados_sim_solver_pyx.so \
+	-Wl,-rpath=$(LIB_PATH) \
+	acados_sim_solver_pyx.o \
+	$(abspath .)/libacados_sim_solver_f1tenth_frenet.so \
+	$(LDFLAGS) $(LDLIBS)
 
 clean:
-	$(RM) $(OBJ) $(EX_OBJ)
-	$(RM) $(LIBACADOS_SOLVER) $(LIBACADOS_OCP_SOLVER)
-	$(RM) $(EX_EXE)
+	$(RM) $(OBJ) $(EX_OBJ) $(EX_SIM_OBJ)
+	$(RM) $(LIBACADOS_SOLVER) $(LIBACADOS_OCP_SOLVER) $(LIBACADOS_SIM_SOLVER)
+	$(RM) $(EX_EXE) $(EX_SIM_EXE)
 clean_ocp_shared_lib:
 	$(RM) $(LIBACADOS_OCP_SOLVER)
 	$(RM) $(OCP_OBJ)
@@ -166,4 +208,8 @@ clean_ocp_cython:
 	$(RM) acados_ocp_solver_pyx.so
 	$(RM) acados_ocp_solver_pyx.o
 
-
+clean_sim_cython:
+	$(RM) libacados_sim_solver_f1tenth_frenet.so
+	$(RM) acados_sim_solver_f1tenth_frenet.o
+	$(RM) acados_sim_solver_pyx.so
+	$(RM) acados_sim_solver_pyx.o

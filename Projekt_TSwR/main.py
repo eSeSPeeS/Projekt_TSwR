@@ -13,7 +13,7 @@ from pathlib import Path
 
 from vehicle_params import VehicleParams
 from track import TrackCenterline
-from simulator import F1tenthSimulator
+from simulator import F1tenthSimulator, SimulationLogger
 from controllers import (
     controller_const_speed,
     controller_pid,
@@ -28,16 +28,23 @@ from controllers import (
 KONTROLER   = 'mpc'          # 'p' | 'pid' | 'random' | 'mpc'
 WIZUALIZACJA = 'wykresy'     # 'wykresy' | 'pybullet' | 'oba'
 
-N_STEPS = 5000
+N_STEPS = 1000
 DT      = 0.02
-VX0     = 2.5
-TOR     = 'road'        # 'oval' | 'figure8' | 'road' | 'technical' | 'technical_sharp'
+VX0     = 4.5
+TOR     = 'figure8'        # 'oval' | 'figure8' | 'road' | 'technical' | 'technical_sharp'
 
 REALTIME_MATPLOTLIB      = True
 REALTIME_INTERVAL_STEPS  = 3
 REALTIME_PAUSE           = 0.001
 
-LOG_EVERY = 10               # co który krok wypisywać log
+LOG_EVERY = 1               # co który krok wypisywać log
+
+# ── Konfiguracja logowania do pliku ──────────────────────────────────────────
+# LOG_PATH = None  → brak zapisu do pliku
+# LOG_PATH = "wyniki.csv"  → zapis każdej iteracji do CSV
+# Automatycznie tworzony jest też plik .json (LOG_PATH.replace('.csv','.json'))
+LOG_PATH         = "wyniki_symulacji.csv"
+LOG_FLUSH_EVERY  = 50    # co ile kroków wymuszać zapis bufora na dysk
 
 # ── Konfiguracja GP ───────────────────────────────────────────────────────────
 # GP_ENABLED = True  → Gaussowski model resztkowy aktywny
@@ -57,7 +64,7 @@ GP_NPZ_FILES     = None   # np. ["plik1.npz", "plik2.npz"]
 # Jeśli plik istnieje, GP zostanie wczytany zamiast trenować od nowa.
 GP_SAVE_PATH     = "gp_model.pt"
 
-GP_MAX_DATA      = 5500    # maks. punktów treningowych (subsample)
+GP_MAX_DATA      = 2000   # maks. punktów treningowych (subsample)
 GP_N_TRAIN_ITER  = 380     # iteracje optymalizacji hiperparametrów
 GP_DEVICE        = 'cpu'  # 'cpu' lub 'cuda'
 
@@ -183,7 +190,7 @@ def main():
 
             dt=DT,         # Krok czasowy [s] — musi być taki sam jak w symulatorze.
 
-            vx_ref=3.5,    # Prędkość docelowa [m/s]. Przy q_vx=0.0 jest ignorowana
+            vx_ref=4.5,    # Prędkość docelowa [m/s]. Przy q_vx=0.0 jest ignorowana
                         # (patrz niżej) — możesz tu wpisać cokolwiek.
 
             # ── Wagi funkcji kosztu ───────────────────────────────────────────────
@@ -197,7 +204,7 @@ def main():
                         # Tłumi oscylacje kątowe — pojazd jedzie "prosto"
                         # względem osi toru, nie bokiem.
 
-            q_vx=0.0,      # Kara za błąd prędkości (vx - vx_ref)². Aktualnie
+            q_vx=0.2,      # Kara za błąd prędkości (vx - vx_ref)². Aktualnie
                         # wyłączona (=0). Pojazd nie stara się utrzymać vx_ref,
                         # prędkość zależy tylko od r_d.
 
@@ -205,10 +212,10 @@ def main():
                         # Mała wartość = MPC chętnie przyspiesza. Zwiększ
                         # jeśli pojazd przyspiesza zbyt agresywnie.
 
-            r_delta=0.5,   # Kara za kąt skrętu δ [rad]. Tłumi ostre skręty.
+            r_delta=0.4,   # Kara za kąt skrętu δ [rad]. Tłumi ostre skręty.
                         # Zwiększ jeśli pojazd "szarpie" kierownicą.
 
-            r_dd=0.5,      # Kara za ZMIANĘ napędu (d_k - d_{k-1})².
+            r_dd=0.1,      # Kara za ZMIANĘ napędu (d_k - d_{k-1})².
                         # Wygładza przyspieszanie/hamowanie między krokami.
 
             r_ddelta=0.2,  # Kara za ZMIANĘ skrętu (δ_k - δ_{k-1})².
@@ -222,6 +229,14 @@ def main():
     else:
         raise ValueError(f'Nieznany kontroler: {KONTROLER}')
 
+    # ── Logger ───────────────────────────────────────────────────────────────
+    sim_logger = None
+    if LOG_PATH:
+        sim_logger = SimulationLogger(
+            csv_path=LOG_PATH,
+            lf=params.lf,
+        )
+
     sim.run(
         ctrl,
         n_steps=N_STEPS,
@@ -230,7 +245,20 @@ def main():
         realtime_plot=REALTIME_MATPLOTLIB and WIZUALIZACJA in ('wykresy', 'oba'),
         realtime_interval_steps=REALTIME_INTERVAL_STEPS,
         realtime_pause=REALTIME_PAUSE,
+        logger=sim_logger,
+        log_flush_every=LOG_FLUSH_EVERY,
     )
+
+    if sim_logger is not None:
+        sim_logger.close()
+        # Podsumowanie
+        stats = sim_logger.summary()
+        print("[Logger] Podsumowanie symulacji:")
+        for k, v in stats.items():
+            print(f"  {k}: {v}")
+        # Opcjonalny zapis JSON
+        json_path = LOG_PATH.replace('.csv', '.json')
+        sim_logger.save_json(json_path)
 
     print('\n[4/4] Wizualizacja końcowa...')
     if WIZUALIZACJA in ('wykresy', 'oba'):

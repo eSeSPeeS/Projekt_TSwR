@@ -103,8 +103,8 @@ static int casadi_f0(const casadi_real** arg, casadi_real** res, casadi_int* iw,
   casadi_copy(arg[0], 6, w02);
   /* #3: @3 = @2[3] */
   for (rr=(&w03), cs=w02+3; cs!=w02+4; cs+=1) *rr++ = *cs;
-  /* #4: @4 = 0.001 */
-  w04 = 1.0000000000000000e-03;
+  /* #4: @4 = 0.3 */
+  w04 = 2.9999999999999999e-01;
   /* #5: @5 = fmax(@3,@4) */
   w05  = casadi_fmax(w03,w04);
   /* #6: @6 = @2[4] */

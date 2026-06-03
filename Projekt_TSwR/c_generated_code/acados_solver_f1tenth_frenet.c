@@ -154,8 +154,8 @@ void f1tenth_frenet_acados_create_set_plan(ocp_nlp_plan_t* nlp_solver_plan, cons
 
     nlp_solver_plan->nlp_solver = SQP_RTI;
 
-    nlp_solver_plan->ocp_qp_solver_plan.qp_solver = FULL_CONDENSING_HPIPM;
-    nlp_solver_plan->relaxed_ocp_qp_solver_plan.qp_solver = FULL_CONDENSING_HPIPM;
+    nlp_solver_plan->ocp_qp_solver_plan.qp_solver = PARTIAL_CONDENSING_HPIPM;
+    nlp_solver_plan->relaxed_ocp_qp_solver_plan.qp_solver = PARTIAL_CONDENSING_HPIPM;
     nlp_solver_plan->nlp_cost[0] = NONLINEAR_LS;
     for (int i = 1; i < N; i++)
         nlp_solver_plan->nlp_cost[i] = NONLINEAR_LS;
@@ -164,9 +164,8 @@ void f1tenth_frenet_acados_create_set_plan(ocp_nlp_plan_t* nlp_solver_plan, cons
 
     for (int i = 0; i < N; i++)
     {
-        nlp_solver_plan->nlp_dynamics[i] = DISCRETE_MODEL;
-        // discrete dynamics does not need sim solver option, this field is ignored
-        nlp_solver_plan->sim_solver_plan[i].sim_solver = INVALID_SIM_SOLVER;
+        nlp_solver_plan->nlp_dynamics[i] = CONTINUOUS_MODEL;
+        nlp_solver_plan->sim_solver_plan[i].sim_solver = ERK;
     }
 
     nlp_solver_plan->nlp_constraints[0] = BGH;
@@ -350,20 +349,23 @@ void f1tenth_frenet_acados_create_setup_functions(f1tenth_frenet_solver_capsule*
 
 
     
-        // discrete dynamics
-        capsule->discr_dyn_phi_fun = (external_function_external_param_casadi *) malloc(sizeof(external_function_external_param_casadi)*N);
-        for (int i = 0; i < N; i++)
-        {
-            MAP_CASADI_FNC(discr_dyn_phi_fun[i], f1tenth_frenet_dyn_disc_phi_fun);
+        // explicit ode
+        capsule->expl_vde_forw = (external_function_external_param_casadi *) malloc(sizeof(external_function_external_param_casadi)*N);
+        for (int i = 0; i < N; i++) {
+            MAP_CASADI_FNC(expl_vde_forw[i], f1tenth_frenet_expl_vde_forw);
         }
 
-        capsule->discr_dyn_phi_fun_jac_ut_xt = (external_function_external_param_casadi *) malloc(sizeof(external_function_external_param_casadi)*N);
-        for (int i = 0; i < N; i++)
-        {
-            MAP_CASADI_FNC(discr_dyn_phi_fun_jac_ut_xt[i], f1tenth_frenet_dyn_disc_phi_fun_jac);
+        
+
+        capsule->expl_ode_fun = (external_function_external_param_casadi *) malloc(sizeof(external_function_external_param_casadi)*N);
+        for (int i = 0; i < N; i++) {
+            MAP_CASADI_FNC(expl_ode_fun[i], f1tenth_frenet_expl_ode_fun);
         }
 
-    
+        capsule->expl_vde_adj = (external_function_external_param_casadi *) malloc(sizeof(external_function_external_param_casadi)*N);
+        for (int i = 0; i < N; i++) {
+            MAP_CASADI_FNC(expl_vde_adj[i], f1tenth_frenet_expl_vde_adj);
+        }
 
     
         // nonlinear least squares cost
@@ -487,11 +489,10 @@ void f1tenth_frenet_acados_setup_nlp_in(f1tenth_frenet_solver_capsule* capsule, 
     /**** Dynamics ****/
     for (int i = 0; i < N; i++)
     {
-        ocp_nlp_dynamics_model_set_external_param_fun(nlp_config, nlp_dims, nlp_in, i, "disc_dyn_fun", &capsule->discr_dyn_phi_fun[i]);
-        ocp_nlp_dynamics_model_set_external_param_fun(nlp_config, nlp_dims, nlp_in, i, "disc_dyn_fun_jac",
-                                   &capsule->discr_dyn_phi_fun_jac_ut_xt[i]);
+        ocp_nlp_dynamics_model_set_external_param_fun(nlp_config, nlp_dims, nlp_in, i, "expl_vde_forw", &capsule->expl_vde_forw[i]);
         
-        
+        ocp_nlp_dynamics_model_set_external_param_fun(nlp_config, nlp_dims, nlp_in, i, "expl_ode_fun", &capsule->expl_ode_fun[i]);
+        ocp_nlp_dynamics_model_set_external_param_fun(nlp_config, nlp_dims, nlp_in, i, "expl_vde_adj", &capsule->expl_vde_adj[i]);
     }
 
     /**** Cost ****/
@@ -504,8 +505,9 @@ void f1tenth_frenet_acados_setup_nlp_in(f1tenth_frenet_solver_capsule* capsule, 
     // change only the non-zero elements:
     W_0[0+(NY0) * 0] = 1;
     W_0[1+(NY0) * 1] = 1;
+    W_0[2+(NY0) * 2] = 0.2;
     W_0[3+(NY0) * 3] = 0.1;
-    W_0[4+(NY0) * 4] = 0.5;
+    W_0[4+(NY0) * 4] = 0.4;
     ocp_nlp_cost_model_set(nlp_config, nlp_dims, nlp_in, 0, "W", W_0);
     free(W_0);
     double* yref = calloc(NY, sizeof(double));
@@ -520,8 +522,9 @@ void f1tenth_frenet_acados_setup_nlp_in(f1tenth_frenet_solver_capsule* capsule, 
     // change only the non-zero elements:
     W[0+(NY) * 0] = 1;
     W[1+(NY) * 1] = 1;
+    W[2+(NY) * 2] = 0.2;
     W[3+(NY) * 3] = 0.1;
-    W[4+(NY) * 4] = 0.5;
+    W[4+(NY) * 4] = 0.4;
 
     for (int i = 1; i < N; i++)
     {
@@ -537,6 +540,7 @@ void f1tenth_frenet_acados_setup_nlp_in(f1tenth_frenet_solver_capsule* capsule, 
     // change only the non-zero elements:
     W_e[0+(NYN) * 0] = 3;
     W_e[1+(NYN) * 1] = 3;
+    W_e[2+(NYN) * 2] = 0.2;
     ocp_nlp_cost_model_set(nlp_config, nlp_dims, nlp_in, N, "W", W_e);
     free(W_e);
     ocp_nlp_cost_model_set_external_param_fun(nlp_config, nlp_dims, nlp_in, 0, "nls_y_fun", &capsule->cost_y_0_fun);
@@ -608,8 +612,8 @@ void f1tenth_frenet_acados_setup_nlp_in(f1tenth_frenet_solver_capsule* capsule, 
     double* lbu = lubu;
     double* ubu = lubu + NBU;
     ubu[0] = 1;
-    lbu[1] = -0.3;
-    ubu[1] = 0.3;
+    lbu[1] = -0.5;
+    ubu[1] = 0.5;
 
     for (int i = 0; i < N; i++)
     {
@@ -633,8 +637,8 @@ void f1tenth_frenet_acados_setup_nlp_in(f1tenth_frenet_solver_capsule* capsule, 
     double* lubx = calloc(2*NBX, sizeof(double));
     double* lbx = lubx;
     double* ubx = lubx + NBX;
-    lbx[0] = -0.7;
-    ubx[0] = 0.7;
+    lbx[0] = -0.25;
+    ubx[0] = 0.25;
 
     for (int i = 1; i < N; i++)
     {
@@ -714,10 +718,43 @@ static void f1tenth_frenet_acados_create_set_opts(f1tenth_frenet_solver_capsule*
     int globalization_full_step_dual = 0;
     ocp_nlp_solver_opts_set(nlp_config, capsule->nlp_opts, "globalization_full_step_dual", &globalization_full_step_dual);
 
+    // set collocation type (relevant for implicit integrators)
+    sim_collocation_type collocation_type = GAUSS_LEGENDRE;
+    for (int i = 0; i < N; i++)
+        ocp_nlp_solver_opts_set_at_stage(nlp_config, nlp_opts, i, "dynamics_collocation_type", &collocation_type);
+
+    // set up sim_method_num_steps
+    // all sim_method_num_steps are identical
+    int sim_method_num_steps = 1;
+    for (int i = 0; i < N; i++)
+        ocp_nlp_solver_opts_set_at_stage(nlp_config, nlp_opts, i, "dynamics_num_steps", &sim_method_num_steps);
+
+    // set up sim_method_num_stages
+    // all sim_method_num_stages are identical
+    int sim_method_num_stages = 4;
+    for (int i = 0; i < N; i++)
+        ocp_nlp_solver_opts_set_at_stage(nlp_config, nlp_opts, i, "dynamics_num_stages", &sim_method_num_stages);
+
+    int newton_iter_val = 3;
+    for (int i = 0; i < N; i++)
+        ocp_nlp_solver_opts_set_at_stage(nlp_config, nlp_opts, i, "dynamics_newton_iter", &newton_iter_val);
+
+    double newton_tol_val = 0;
+    for (int i = 0; i < N; i++)
+        ocp_nlp_solver_opts_set_at_stage(nlp_config, nlp_opts, i, "dynamics_newton_tol", &newton_tol_val);
+
+    // set up sim_method_jac_reuse
+    bool tmp_bool = (bool) 0;
+    for (int i = 0; i < N; i++)
+        ocp_nlp_solver_opts_set_at_stage(nlp_config, nlp_opts, i, "dynamics_jac_reuse", &tmp_bool);
+
     double levenberg_marquardt = 0.001;
     ocp_nlp_solver_opts_set(nlp_config, nlp_opts, "levenberg_marquardt", &levenberg_marquardt);
 
     /* options QP solver */
+    int qp_solver_cond_N;const int qp_solver_cond_N_ori = 30;
+    qp_solver_cond_N = N < qp_solver_cond_N_ori ? N : qp_solver_cond_N_ori; // use the minimum value here
+    ocp_nlp_solver_opts_set(nlp_config, nlp_opts, "qp_cond_N", &qp_solver_cond_N);
 
     int nlp_solver_ext_qp_res = 0;
     ocp_nlp_solver_opts_set(nlp_config, nlp_opts, "ext_qp_res", &nlp_solver_ext_qp_res);
@@ -762,6 +799,12 @@ static void f1tenth_frenet_acados_create_set_opts(f1tenth_frenet_solver_capsule*
 
     int print_level = 0;
     ocp_nlp_solver_opts_set(nlp_config, nlp_opts, "print_level", &print_level);
+    int qp_solver_cond_ric_alg = 1;
+    ocp_nlp_solver_opts_set(nlp_config, nlp_opts, "qp_cond_ric_alg", &qp_solver_cond_ric_alg);
+
+    int qp_solver_ric_alg = 1;
+    ocp_nlp_solver_opts_set(nlp_config, nlp_opts, "qp_ric_alg", &qp_solver_ric_alg);
+
 
     int ext_cost_num_hess = 0;
 }
@@ -870,8 +913,22 @@ int f1tenth_frenet_acados_create_with_discretization(f1tenth_frenet_solver_capsu
  */
 int f1tenth_frenet_acados_update_qp_solver_cond_N(f1tenth_frenet_solver_capsule* capsule, int qp_solver_cond_N)
 {
-    printf("\nacados_update_qp_solver_cond_N() not implemented, since no partial condensing solver is used!\n\n");
-    exit(1);
+    // 1) destroy solver
+    ocp_nlp_solver_destroy(capsule->nlp_solver);
+
+    // 2) set new value for "qp_cond_N"
+    const int N = capsule->nlp_solver_plan->N;
+    if(qp_solver_cond_N > N)
+        printf("Warning: qp_solver_cond_N = %d > N = %d\n", qp_solver_cond_N, N);
+    ocp_nlp_solver_opts_set(capsule->nlp_config, capsule->nlp_opts, "qp_cond_N", &qp_solver_cond_N);
+
+    // 3) continue with the remaining steps from f1tenth_frenet_acados_create_with_discretization(...):
+    // -> 8) create solver
+    capsule->nlp_solver = ocp_nlp_solver_create(capsule->nlp_config, capsule->nlp_dims, capsule->nlp_opts, capsule->nlp_in);
+
+    // -> 9) do precomputations
+    int status = f1tenth_frenet_acados_create_precompute(capsule);
+    return status;
 }
 
 
@@ -901,6 +958,14 @@ int f1tenth_frenet_acados_reset(f1tenth_frenet_solver_capsule* capsule, int rese
         {
             ocp_nlp_out_set(nlp_config, nlp_dims, nlp_out, nlp_in, i, "pi", buffer);
         }
+    }
+    // get qp_status: if NaN -> reset memory
+    int qp_status;
+    ocp_nlp_get(capsule->nlp_solver, "qp_status", &qp_status);
+    if (reset_qp_solver_mem || (qp_status == 3))
+    {
+        // printf("\nin reset qp_status %d -> resetting QP memory\n", qp_status);
+        ocp_nlp_solver_reset_qp_memory(nlp_solver, nlp_in, nlp_out);
     }
 
     free(buffer);
@@ -984,15 +1049,15 @@ int f1tenth_frenet_acados_free(f1tenth_frenet_solver_capsule* capsule)
     // dynamics
     for (int i = 0; i < N; i++)
     {
-        external_function_external_param_casadi_free(&capsule->discr_dyn_phi_fun[i]);
-        external_function_external_param_casadi_free(&capsule->discr_dyn_phi_fun_jac_ut_xt[i]);
+        external_function_external_param_casadi_free(&capsule->expl_vde_forw[i]);
         
-        
+        external_function_external_param_casadi_free(&capsule->expl_ode_fun[i]);
+        external_function_external_param_casadi_free(&capsule->expl_vde_adj[i]);
     }
-    free(capsule->discr_dyn_phi_fun);
-    free(capsule->discr_dyn_phi_fun_jac_ut_xt);
-  
-  
+    free(capsule->expl_vde_adj);
+    free(capsule->expl_vde_forw);
+    
+    free(capsule->expl_ode_fun);
 
     // cost
     external_function_external_param_casadi_free(&capsule->cost_y_0_fun);

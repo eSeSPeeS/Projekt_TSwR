@@ -36,27 +36,34 @@ extern "C" {
 #endif
 
 
+/* explicit ODE */
+
+// explicit ODE
+int f1tenth_frenet_expl_ode_fun(const real_t** arg, real_t** res, int* iw, real_t* w, void *mem);
+int f1tenth_frenet_expl_ode_fun_work(int *, int *, int *, int *);
+const int *f1tenth_frenet_expl_ode_fun_sparsity_in(int);
+const int *f1tenth_frenet_expl_ode_fun_sparsity_out(int);
+int f1tenth_frenet_expl_ode_fun_n_in(void);
+int f1tenth_frenet_expl_ode_fun_n_out(void);
+
+// explicit forward VDE
+int f1tenth_frenet_expl_vde_forw(const real_t** arg, real_t** res, int* iw, real_t* w, void *mem);
+int f1tenth_frenet_expl_vde_forw_work(int *, int *, int *, int *);
+const int *f1tenth_frenet_expl_vde_forw_sparsity_in(int);
+const int *f1tenth_frenet_expl_vde_forw_sparsity_out(int);
+int f1tenth_frenet_expl_vde_forw_n_in(void);
+int f1tenth_frenet_expl_vde_forw_n_out(void);
+
+// explicit param-direction forward VDE
 
 
-int f1tenth_frenet_dyn_disc_phi_fun(const real_t** arg, real_t** res, int* iw, real_t* w, void *mem);
-int f1tenth_frenet_dyn_disc_phi_fun_work(int *, int *, int *, int *);
-const int *f1tenth_frenet_dyn_disc_phi_fun_sparsity_in(int);
-const int *f1tenth_frenet_dyn_disc_phi_fun_sparsity_out(int);
-int f1tenth_frenet_dyn_disc_phi_fun_n_in(void);
-int f1tenth_frenet_dyn_disc_phi_fun_n_out(void);
-
-int f1tenth_frenet_dyn_disc_phi_fun_jac(const real_t** arg, real_t** res, int* iw, real_t* w, void *mem);
-int f1tenth_frenet_dyn_disc_phi_fun_jac_work(int *, int *, int *, int *);
-const int *f1tenth_frenet_dyn_disc_phi_fun_jac_sparsity_in(int);
-const int *f1tenth_frenet_dyn_disc_phi_fun_jac_sparsity_out(int);
-int f1tenth_frenet_dyn_disc_phi_fun_jac_n_in(void);
-int f1tenth_frenet_dyn_disc_phi_fun_jac_n_out(void);
-
-
-
-
-
-
+// explicit adjoint VDE
+int f1tenth_frenet_expl_vde_adj(const real_t** arg, real_t** res, int* iw, real_t* w, void *mem);
+int f1tenth_frenet_expl_vde_adj_work(int *, int *, int *, int *);
+const int *f1tenth_frenet_expl_vde_adj_sparsity_in(int);
+const int *f1tenth_frenet_expl_vde_adj_sparsity_out(int);
+int f1tenth_frenet_expl_vde_adj_n_in(void);
+int f1tenth_frenet_expl_vde_adj_n_out(void);
 
 
 

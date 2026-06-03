@@ -329,7 +329,9 @@ class GPResidualModel:
             train_x = torch.tensor(X_norm, dtype=torch.float32).to(self.device)
             train_y = torch.tensor(y_i,    dtype=torch.float32).to(self.device)
 
-            likelihood = GaussianLikelihood().to(self.device)
+            #likelihood = GaussianLikelihood().to(self.device)
+            likelihood = GaussianLikelihood(noise_constraint=gpytorch.constraints.GreaterThan(1e-3)).to(self.device)
+            likelihood.noise = torch.tensor(0.01)
             gp         = _SingleOutputGP(train_x, train_y, likelihood).to(self.device)
 
             gp.train(); likelihood.train()
