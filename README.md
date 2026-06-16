@@ -9,7 +9,7 @@ Zaimplementowanie regulatora typu Model Predictive Control (MPC) z Gaussian Proc
 ## Milestones
 
 1. Stworzenie symulatora samochodu
-2. Impementacja MPC
+2. Implementacja MPC
 3. Implementacja Gaussian Process'u do MPC
 
 ## Technologie
